@@ -1,0 +1,18 @@
+# SlickDash (iOS)
+
+SwiftUI companion for **Gran Turismo 7** live telemetry.
+
+Not affiliated with Sony Interactive Entertainment or Polyphony Digital.
+
+The GitHub repo starts empty of an `.xcodeproj` binary; generate one on a Mac:
+
+```bash
+brew install xcodegen
+cd gran-turismo-telemetry-ios
+xcodegen generate
+open SlickDash.xcodeproj
+```
+
+Find PS5 on launch. Simple is the default. Needs a device (or simulator for UI only) on the same LAN as the PS5. Local network permission is required.
+
+Heartbeat UDP 33739, receive 33740.
