@@ -353,6 +353,10 @@ struct SettingsSheet: View {
                     TextField("PS5 IPv4", text: $m.manualIp).textFieldStyle(.roundedBorder)
                     Button("Connect") { m.connectIp(); m.showIp = false }.foregroundStyle(cyan)
                 }
+                #if DEBUG
+                Button("Send Sentry test") { SlickDashApp.captureTestError() }
+                    .font(.system(size: 12)).foregroundStyle(muted)
+                #endif
                 Spacer()
             }
             .padding(12)

@@ -3,3 +3,8 @@
 *.xcworkspace
 DerivedData/
 .build/
+
+# Sentry org tokens / upload credentials — never commit
+sentry.properties
+.sentryclirc
+**/sentry.properties

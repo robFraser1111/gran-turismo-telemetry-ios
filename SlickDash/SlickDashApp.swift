@@ -1,11 +1,49 @@
 import SwiftUI
+import Sentry
 
 @main
 struct SlickDashApp: App {
     @StateObject var model = DashModel()
+
+    init() {
+        SentrySDK.start { options in
+            // Public client DSN for gran-telemetry-ios (org robert-fraser). Event submit only.
+            // Override with SENTRY_DSN in the environment if needed. Never commit org auth tokens.
+            let envDsn = ProcessInfo.processInfo.environment["SENTRY_DSN"]
+            options.dsn = (envDsn?.isEmpty == false) ? envDsn : Self.defaultDsn
+            options.sendDefaultPii = false
+            options.tracesSampleRate = 0.2
+            options.releaseName = "slickdash-ios@\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0")"
+            #if DEBUG
+            options.environment = "development"
+            options.debug = true
+            #else
+            options.environment = "production"
+            #endif
+            options.beforeSend = { event in
+                event.serverName = nil
+                return event
+            }
+        }
+    }
+
     var body: some Scene {
         WindowGroup { ContentView().environmentObject(model) }
     }
+
+    /// Public client DSN only — not an org auth token.
+    static let defaultDsn =
+        "https://e4b6a7f87d1ab64c721739ef97a0f90b@o4511995844231168.ingest.us.sentry.io/4511997557997568"
+
+    #if DEBUG
+    static func captureTestError() {
+        SentrySDK.capture(error: NSError(
+            domain: "SlickDash",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "SlickDash iOS Sentry test \(Date())"]
+        ))
+    }
+    #endif
 }
 
 enum Mode: String, CaseIterable { case simple = "Simple"; case driving = "Driving"; case pit = "Pit wall" }

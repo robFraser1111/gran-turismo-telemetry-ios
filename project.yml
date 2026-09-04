@@ -3,6 +3,10 @@ options:
   bundleIdPrefix: com.robfraser
   deploymentTarget:
     iOS: "17.0"
+packages:
+  sentry-cocoa:
+    url: https://github.com/getsentry/sentry-cocoa
+    from: 9.15.0
 settings:
   base:
     PRODUCT_NAME: SlickDash
@@ -18,6 +22,9 @@ targets:
     type: application
     platform: iOS
     sources: [SlickDash]
+    dependencies:
+      - package: sentry-cocoa
+        product: Sentry
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.robfraser.slickdash
