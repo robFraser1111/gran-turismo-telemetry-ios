@@ -3,3 +3,7 @@
 *.xcworkspace
 DerivedData/
 .build/
+sentry.properties
+*.mobileprovision
+*.p12
+AuthKey_*.p8
