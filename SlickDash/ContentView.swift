@@ -91,18 +91,39 @@ struct Bar: View {
 struct SimpleView: View {
     @EnvironmentObject var m: DashModel
     var body: some View {
-        HStack(spacing: 8) {
-            CardBox {
-                Lbl(t: "Fuel — this session")
-                Text(String(format: "%.0f%%", m.fuelPct)).font(.system(size: 42, weight: .semibold))
-                Bar(frac: CGFloat(m.fuelPct/100), color: amber)
-                Text("\(m.fuelPerLap.map { String(format: "%.1f%%/lap", $0) } ?? "—%/lap")")
-                Text("\(m.lapsRemaining.map { String(format: "%.1f laps remaining", $0) } ?? "— laps remaining")")
-                Text("\(m.stops) stop").font(.system(size: 12)).foregroundStyle(muted)
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            CardBox { Lbl(t: "Tire temps"); TireGrid(p: m.packet).frame(maxHeight: .infinity) }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }.padding(8)
+        GeometryReader { geo in
+            let land = geo.size.width > geo.size.height
+            Group {
+                if land {
+                    HStack(spacing: 8) {
+                        CardBox {
+                            Lbl(t: "Fuel — this session")
+                            Text(String(format: "%.0f%%", m.fuelPct)).font(.system(size: 42, weight: .semibold))
+                            Bar(frac: CGFloat(m.fuelPct/100), color: amber)
+                            Text("\(m.fuelPerLap.map { String(format: "%.1f%%/lap", $0) } ?? "—%/lap")")
+                            Text("\(m.lapsRemaining.map { String(format: "%.1f laps remaining", $0) } ?? "— laps remaining")")
+                            Text("\(m.stops) stop").font(.system(size: 12)).foregroundStyle(muted)
+                        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                        CardBox { Lbl(t: "Tire temps"); TireGrid(p: m.packet).frame(maxHeight: .infinity) }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                } else {
+                    ScrollView {
+                        VStack(spacing: 8) {
+                            CardBox {
+                                Lbl(t: "Fuel — this session")
+                                Text(String(format: "%.0f%%", m.fuelPct)).font(.system(size: 42, weight: .semibold))
+                                Bar(frac: CGFloat(m.fuelPct/100), color: amber)
+                                Text("\(m.fuelPerLap.map { String(format: "%.1f%%/lap", $0) } ?? "—%/lap")")
+                                Text("\(m.lapsRemaining.map { String(format: "%.1f laps remaining", $0) } ?? "— laps remaining")")
+                                Text("\(m.stops) stop").font(.system(size: 12)).foregroundStyle(muted)
+                            }
+                            CardBox { Lbl(t: "Tire temps"); TireGrid(p: m.packet).frame(height: 260) }
+                        }.padding(8)
+                    }
+                }
+            }.padding(land ? 8 : 0)
+        }
     }
 }
 
@@ -129,41 +150,82 @@ struct DrivingView: View {
     @EnvironmentObject var m: DashModel
     var p: TelemetryPacket? { m.packet }
     var body: some View {
-        HStack(spacing: 8) {
-            VStack(spacing: 8) {
-                CardBox {
-                    Lbl(t: "Gear / speed"); RpmBar(frac: p?.rpmFrac ?? 0)
-                    HStack(alignment: .bottom) {
-                        VStack(alignment: .leading) { Lbl(t: "Gear"); Text(p?.gearDisplay ?? "N").font(.system(size: 34, weight: .semibold)) }
-                        VStack(alignment: .leading) { Lbl(t: "Speed"); Text(String(format: "%d km/h", Int(p?.speedKph ?? 0))).font(.system(size: 22, weight: .semibold)) }
+        GeometryReader { geo in
+            let land = geo.size.width > geo.size.height
+            Group {
+                if land {
+                    // Max 2 columns: Gear+Throttle | Delta / Fuel+Tires
+                    HStack(alignment: .top, spacing: 8) {
+                        ScrollView {
+                            VStack(spacing: 8) {
+                                gearSpeedCard
+                                throttleBrakeCard
+                            }
+                        }.frame(maxWidth: .infinity)
+                        ScrollView {
+                            VStack(spacing: 8) {
+                                deltaCard
+                                fuelCard
+                                CardBox { Lbl(t: "Tire temps"); TireGrid(p: p).frame(height: 180) }
+                            }
+                        }.frame(maxWidth: .infinity)
+                    }.padding(8)
+                } else {
+                    // Portrait: always 1 column
+                    ScrollView {
+                        VStack(spacing: 8) {
+                            gearSpeedCard
+                            throttleBrakeCard
+                            deltaCard
+                            fuelCard
+                            CardBox { Lbl(t: "Tire temps"); TireGrid(p: p).frame(height: 220) }
+                        }.padding(8)
                     }
                 }
-                CardBox {
-                    HStack { Lbl(t: "Throttle"); Spacer(); Text("\(p?.throttlePct ?? 0)%").foregroundStyle(green) }
-                    Bar(frac: CGFloat(p?.throttlePct ?? 0)/100, color: Color(red: 0.086, green: 0.396, blue: 0.204))
-                    HStack { Lbl(t: "Brake"); Spacer(); Text("\(p?.brakePct ?? 0)%").foregroundStyle(muted) }
-                    Bar(frac: CGFloat(p?.brakePct ?? 0)/100, color: red)
-                }
-            }.frame(maxWidth: .infinity)
-            CardBox {
-                Lbl(t: "Delta vs session best")
-                Text(formatDelta(m.liveDelta)).font(.system(size: 34, weight: .semibold))
-                    .foregroundStyle((m.liveDelta ?? 0) < 0 ? green : ((m.liveDelta == nil) ? text : red))
-                Spacer()
-                HStack { Text("LAST \(formatLap(m.lastMs))"); Spacer(); Text("BEST \(formatLap(m.bestMs))") }
-                    .font(.system(size: 12)).foregroundStyle(muted)
-            }.frame(maxWidth: .infinity)
-            VStack(spacing: 8) {
-                CardBox {
-                    Lbl(t: "Fuel — this session")
-                    Text(String(format: "%.0f%%", m.fuelPct)).font(.system(size: 22, weight: .semibold))
-                    Bar(frac: CGFloat(m.fuelPct/100), color: amber)
-                    Text(m.fuelPerLap.map { String(format: "%.1f%%/lap", $0) } ?? "—")
-                    Text("\(m.lapsRemaining.map { String(format: "%.1f", $0) } ?? "—") laps · \(m.stops) stop").foregroundStyle(muted).font(.system(size: 12))
-                }
-                CardBox { Lbl(t: "Tire temps"); TireGrid(p: p) }
-            }.frame(maxWidth: .infinity)
-        }.padding(8)
+            }
+        }
+    }
+
+    private var gearSpeedCard: some View {
+        CardBox {
+            Lbl(t: "Gear / speed"); RpmBar(frac: p?.rpmFrac ?? 0)
+            HStack(alignment: .bottom) {
+                VStack(alignment: .leading) { Lbl(t: "Gear"); Text(p?.gearDisplay ?? "N").font(.system(size: 34, weight: .semibold)) }
+                VStack(alignment: .leading) { Lbl(t: "Speed"); Text(String(format: "%d km/h", Int(p?.speedKph ?? 0))).font(.system(size: 22, weight: .semibold)) }
+            }
+        }
+    }
+
+    private var throttleBrakeCard: some View {
+        CardBox {
+            HStack { Lbl(t: "Throttle"); Spacer(); Text("\(p?.throttlePct ?? 0)%").foregroundStyle(green) }
+            Bar(frac: CGFloat(p?.throttlePct ?? 0)/100, color: Color(red: 0.086, green: 0.396, blue: 0.204))
+            HStack { Lbl(t: "Brake"); Spacer(); Text("\(p?.brakePct ?? 0)%").foregroundStyle(muted) }
+            Bar(frac: CGFloat(p?.brakePct ?? 0)/100, color: red)
+        }
+    }
+
+    private var deltaCard: some View {
+        CardBox {
+            Lbl(t: "Delta vs session best")
+            Text(formatDelta(m.liveDelta))
+                .font(.system(size: 34, weight: .semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
+                .foregroundStyle((m.liveDelta ?? 0) < 0 ? green : ((m.liveDelta == nil) ? text : red))
+            HStack { Text("LAST \(formatLap(m.lastMs))"); Spacer(); Text("BEST \(formatLap(m.bestMs))") }
+                .font(.system(size: 12)).foregroundStyle(muted)
+        }
+    }
+
+    private var fuelCard: some View {
+        CardBox {
+            Lbl(t: "Fuel — this session")
+            Text(String(format: "%.0f%%", m.fuelPct)).font(.system(size: 22, weight: .semibold))
+            Bar(frac: CGFloat(m.fuelPct/100), color: amber)
+            Text(m.fuelPerLap.map { String(format: "%.1f%%/lap", $0) } ?? "—")
+            Text("\(m.lapsRemaining.map { String(format: "%.1f", $0) } ?? "—") laps · \(m.stops) stop").foregroundStyle(muted).font(.system(size: 12))
+        }
     }
 }
 
