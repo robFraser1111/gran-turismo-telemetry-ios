@@ -23,6 +23,12 @@ enum Salsa20 {
             if state[8] == 0 { state[9] &+= 1 }
         }
     }
+    /// First 64 bytes of keystream for (key, nonce) with counter 0. Used by tests.
+    static func firstBlock(key: [UInt8], nonce: [UInt8]) -> [UInt8] {
+        var zeros = [UInt8](repeating: 0, count: 64)
+        xorInPlace(key: key, nonce: nonce, cipher: &zeros)
+        return zeros
+    }
     static func rotl(_ v: UInt32, _ c: Int) -> UInt32 { (v << c) | (v >> (32 - c)) }
     static func generate(_ input: [UInt32], _ out: inout [UInt8]) {
         var x = input
@@ -53,23 +59,73 @@ enum Salsa20 {
 }
 
 enum Gt7Crypto {
+    static let keySeed = "Simulator Interface Packet GT7 ver 0.0"
+    static let deadBeaf: UInt32 = 0xDEADBEAF
     static let magic: UInt32 = 0x47375330
-    static let key: [UInt8] = Array("Simulator Interface Packet GT7 ver 0.0".utf8) + Array(repeating: 0, count: 32)
-    static func tryDecode(_ raw: [UInt8]) -> TelemetryPacket? {
-        guard raw.count >= TelemetryPacket.minSize else { return nil }
-        var buf = raw
-        func u32(_ b: [UInt8], _ o: Int) -> UInt32 {
-            UInt32(b[o]) | UInt32(b[o+1]) << 8 | UInt32(b[o+2]) << 16 | UInt32(b[o+3]) << 24
-        }
-        let oiv = u32(buf, 0x40)
-        var nonce = [UInt8](repeating: 0, count: 8)
-        let xored = oiv ^ 0xDEADBEAF
-        for i in 0..<4 { nonce[i] = UInt8((xored >> (8*i)) & 0xff); nonce[4+i] = UInt8((oiv >> (8*i)) & 0xff) }
-        let k = Array(key.prefix(32))
-        Salsa20.xorInPlace(key: k, nonce: nonce, cipher: &buf)
-        if u32(buf, 0) != magic { return nil }
-        return TelemetryPacket.parse(buf)
+    static let key: [UInt8] = {
+        let raw = Array(keySeed.utf8)
+        return Array(raw.prefix(32))
+    }()
+
+    static func buildNonce(_ oiv: UInt32, into nonce: inout [UInt8]) {
+        let xored = oiv ^ deadBeaf
+        writeU32(&nonce, 0, xored)
+        writeU32(&nonce, 4, oiv)
     }
+
+    /// Builds ciphertext that decrypts back to `plaintext` via `tryDecode`.
+    /// Bytes at 0x40 in the result are literally `ciphertextIv`.
+    static func encryptForTest(plaintext: [UInt8], ciphertextIv: UInt32) -> [UInt8] {
+        var nonce = [UInt8](repeating: 0, count: 8)
+        buildNonce(ciphertextIv, into: &nonce)
+        var cipher = plaintext
+        Salsa20.xorInPlace(key: key, nonce: nonce, cipher: &cipher)
+        writeU32(&cipher, 0x40, ciphertextIv)
+        return cipher
+    }
+
+    static func tryDecode(_ raw: [UInt8]) -> (packet: TelemetryPacket?, reason: String?) {
+        guard raw.count >= TelemetryPacket.minSize else {
+            return (nil, "short packet (\(raw.count) bytes, need >= \(TelemetryPacket.minSize))")
+        }
+        var buf = raw
+        let oiv = readU32(buf, 0x40)
+        var nonce = [UInt8](repeating: 0, count: 8)
+        buildNonce(oiv, into: &nonce)
+        Salsa20.xorInPlace(key: key, nonce: nonce, cipher: &buf)
+        let got = readU32(buf, 0)
+        if got != magic {
+            let hex = String(format: "%08X", got)
+            return (nil, "bad magic 0x\(hex) after decrypt (expected 0x47375330 'G7S0')")
+        }
+        return (TelemetryPacket.parse(buf), nil)
+    }
+}
+
+enum QualityRating { case poor, fair, good }
+
+/// Connection quality from packet rate and decode-error ratio (matches Windows).
+enum ConnectionQuality {
+    static func classify(packetsPerSecond: Double, errorRatio: Double) -> QualityRating {
+        let err = min(1, max(0, errorRatio))
+        if packetsPerSecond >= 40 && err < 0.08 { return .good }
+        if packetsPerSecond >= 12 && err < 0.25 { return .fair }
+        return .poor
+    }
+}
+
+func readU32(_ bytes: [UInt8], _ offset: Int) -> UInt32 {
+    UInt32(bytes[offset])
+        | (UInt32(bytes[offset + 1]) << 8)
+        | (UInt32(bytes[offset + 2]) << 16)
+        | (UInt32(bytes[offset + 3]) << 24)
+}
+
+func writeU32(_ bytes: inout [UInt8], _ offset: Int, _ value: UInt32) {
+    bytes[offset] = UInt8(value & 0xFF)
+    bytes[offset + 1] = UInt8((value >> 8) & 0xFF)
+    bytes[offset + 2] = UInt8((value >> 16) & 0xFF)
+    bytes[offset + 3] = UInt8((value >> 24) & 0xFF)
 }
 
 struct TelemetryPacket {
@@ -174,7 +230,8 @@ final class Gt7UdpClient {
             guard let self, let data, !data.isEmpty else { return }
             self.onRaw?()
             let bytes = [UInt8](data)
-            guard let pkt = Gt7Crypto.tryDecode(bytes) else { self.onErr?(); return }
+            let decoded = Gt7Crypto.tryDecode(bytes)
+            guard let pkt = decoded.packet else { self.onErr?(); return }
             if self.peer == nil {
                 if case let .hostPort(host, _) = c.endpoint {
                     let ip = "\(host)"
