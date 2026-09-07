@@ -102,89 +102,171 @@ struct TelemetryPacket {
 }
 
 final class Gt7UdpClient {
-    static let sendPort: NWEndpoint.Port = 33739
-    static let recvPort: NWEndpoint.Port = 33740
-    private var conn: NWConnection?
-    private var listener: NWListener?
+    static let sendPort: UInt16 = 33739
+    static let recvPort: UInt16 = 33740
     var onPacket: ((TelemetryPacket) -> Void)?
     var onRaw: (() -> Void)?
     var onErr: (() -> Void)?
     var onPeer: ((String) -> Void)?
     var onStatus: ((String) -> Void)?
-    private var peer: String?
-    private var hb: DispatchSourceTimer?
+
     private let queue = DispatchQueue(label: "gt7.udp")
+    private var running = false
+    private var sock: Int32 = -1
+    private var peer: String?
     private var discovering = false
-    private var broadcastConn: NWConnection?
+    private var heartbeatTargets: [String] = []
 
     func startDiscover() {
         stop()
         discovering = true
         peer = nil
+        heartbeatTargets = Self.broadcastAddresses()
         onStatus?("Looking for GT7 on this network…")
-        bindReceive()
-        heartbeat(to: "255.255.255.255")
+        startLoop()
     }
+
     func startHost(_ ip: String) {
         stop()
         discovering = false
         peer = ip
+        heartbeatTargets = [ip]
         onStatus?("Heartbeat → \(ip)")
-        bindReceive()
-        heartbeat(to: ip)
+        startLoop()
     }
+
     func stop() {
-        hb?.cancel(); hb = nil
-        listener?.cancel(); listener = nil
-        broadcastConn?.cancel(); broadcastConn = nil
-        conn?.cancel(); conn = nil
+        running = false
+        let fd = sock
+        sock = -1
+        if fd >= 0 { Darwin.close(fd) }
     }
-    private func bindReceive() {
-        do {
-            let l = try NWListener(using: .udp, on: Self.recvPort)
-            l.newConnectionHandler = { [weak self] c in
-                c.start(queue: self?.queue ?? .main)
-                self?.receive(c)
+
+    private func startLoop() {
+        running = true
+        queue.async { [weak self] in self?.runLoop() }
+    }
+
+    private func runLoop() {
+        let fd = Darwin.socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+        guard fd >= 0 else {
+            DispatchQueue.main.async { self.onStatus?("UDP socket failed") }
+            return
+        }
+        sock = fd
+        var yes: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+        setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &yes, socklen_t(MemoryLayout<Int32>.size))
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = Self.sendPort.bigEndian // placeholder; set recv below
+        addr.sin_port = Self.recvPort.bigEndian
+        addr.sin_addr = in_addr(s_addr: INADDR_ANY.bigEndian)
+        let bindOk: Bool = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
             }
-            l.start(queue: queue)
-            listener = l
-        } catch {
-            onStatus?("bind :33740 failed: \(error.localizedDescription)")
         }
-    }
-    private func heartbeat(to host: String) {
-        let c = NWConnection(host: NWEndpoint.Host(host), port: Self.sendPort, using: .udp)
-        c.start(queue: queue)
-        broadcastConn = c
-        let t = DispatchSource.makeTimerSource(queue: queue)
-        t.schedule(deadline: .now(), repeating: 0.25)
-        t.setEventHandler { [weak self] in
-            guard let self else { return }
-            let dest = self.peer ?? host
-            let conn = NWConnection(host: NWEndpoint.Host(dest), port: Self.sendPort, using: .udp)
-            conn.start(queue: self.queue)
-            conn.send(content: Data([UInt8(ascii: "A")]), completion: .contentProcessed { _ in conn.cancel() })
+        guard bindOk else {
+            DispatchQueue.main.async { self.onStatus?("bind :33740 failed") }
+            Darwin.close(fd)
+            if sock == fd { sock = -1 }
+            return
         }
-        t.resume()
-        hb = t
-    }
-    private func receive(_ c: NWConnection) {
-        c.receiveMessage { [weak self] data, _, _, _ in
-            defer { self?.receive(c) }
-            guard let self, let data, !data.isEmpty else { return }
-            self.onRaw?()
-            let bytes = [UInt8](data)
-            guard let pkt = Gt7Crypto.tryDecode(bytes) else { self.onErr?(); return }
-            if self.peer == nil {
-                if case let .hostPort(host, _) = c.endpoint {
-                    let ip = "\(host)"
-                    self.peer = ip
-                    self.discovering = false
-                    DispatchQueue.main.async { self.onPeer?(ip); self.onStatus?("Connected \(ip)") }
+
+        var tv = timeval(tv_sec: 0, tv_usec: 50_000)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
+        var lastHb = Date.distantPast
+        var buf = [UInt8](repeating: 0, count: 4096)
+        while running {
+            let now = Date()
+            if now.timeIntervalSince(lastHb) > 0.25 {
+                lastHb = now
+                let targets: [String]
+                if let peer {
+                    targets = [peer]
+                } else {
+                    targets = heartbeatTargets.isEmpty ? ["255.255.255.255"] : heartbeatTargets
+                }
+                for host in targets {
+                    Self.sendHeartbeat(fd: fd, host: host, port: Self.sendPort)
+                }
+            }
+
+            var src = sockaddr_in()
+            var srcLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let n: Int = withUnsafeMutablePointer(to: &src) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                    Darwin.recvfrom(fd, &buf, buf.count, 0, sa, &srcLen)
+                }
+            }
+            guard n > 0 else { continue }
+            DispatchQueue.main.async { self.onRaw?() }
+            let bytes = Array(buf.prefix(n))
+            guard let pkt = Gt7Crypto.tryDecode(bytes) else {
+                DispatchQueue.main.async { self.onErr?() }
+                continue
+            }
+            if peer == nil {
+                let ip = Self.ipString(src.sin_addr)
+                if !ip.isEmpty && ip != "0.0.0.0" {
+                    peer = ip
+                    discovering = false
+                    DispatchQueue.main.async {
+                        self.onPeer?(ip)
+                        self.onStatus?("Connected \(ip)")
+                    }
                 }
             }
             DispatchQueue.main.async { self.onPacket?(pkt) }
         }
+        if sock == fd {
+            Darwin.close(fd)
+            sock = -1
+        }
+    }
+
+    private static func sendHeartbeat(fd: Int32, host: String, port: UInt16) {
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        guard host.withCString({ inet_pton(AF_INET, $0, &addr.sin_addr) }) == 1 else { return }
+        var payload: [UInt8] = [UInt8(ascii: "A")]
+        _ = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                Darwin.sendto(fd, &payload, 1, 0, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+    }
+
+    private static func ipString(_ addr: in_addr) -> String {
+        var addr = addr
+        var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        guard inet_ntop(AF_INET, &addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil else { return "" }
+        return String(cString: buf)
+    }
+
+    /// Global broadcast plus per-interface directed broadcasts (matches Android).
+    private static func broadcastAddresses() -> [String] {
+        var out: [String] = ["255.255.255.255"]
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return out }
+        defer { freeifaddrs(ifaddr) }
+        var ptr: UnsafeMutablePointer<ifaddrs>? = first
+        while let p = ptr {
+            defer { ptr = p.pointee.ifa_next }
+            let flags = Int32(p.pointee.ifa_flags)
+            guard (flags & IFF_UP) != 0, (flags & IFF_LOOPBACK) == 0 else { continue }
+            guard let dst = p.pointee.ifa_dstaddr else { continue }
+            guard dst.pointee.sa_family == sa_family_t(AF_INET) else { continue }
+            let broad = dst.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
+            let ip = ipString(broad)
+            if !ip.isEmpty { out.append(ip) }
+        }
+        return Array(Set(out)).sorted()
     }
 }
 
