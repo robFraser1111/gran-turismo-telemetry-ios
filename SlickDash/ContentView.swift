@@ -73,10 +73,12 @@ struct HeaderBar: View {
 }
 
 struct CardBox<Content: View>: View {
+    var fillHeight: Bool = false
     @ViewBuilder var content: Content
     var body: some View {
         VStack(alignment: .leading, spacing: 6) { content }
             .padding(10)
+            .frame(maxWidth: .infinity, maxHeight: fillHeight ? .infinity : nil, alignment: .topLeading)
             .background(card)
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(line))
             .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -105,18 +107,25 @@ struct SimpleView: View {
             let land = geo.size.width > geo.size.height
             Group {
                 if land {
-                    HStack(spacing: 8) {
-                        CardBox {
+                    HStack(alignment: .top, spacing: 8) {
+                        CardBox(fillHeight: true) {
                             Lbl(t: "Fuel — this session")
                             Text(String(format: "%.0f%%", m.fuelPct)).font(.system(size: 42, weight: .semibold))
                             Bar(frac: CGFloat(m.fuelPct/100), color: amber)
                             Text("\(m.fuelPerLap.map { String(format: "%.1f%%/lap", $0) } ?? "—%/lap")")
                             Text("\(m.lapsRemaining.map { String(format: "%.1f laps remaining", $0) } ?? "— laps remaining")")
                             Text(m.stops == 1 ? "1 stop" : "\(m.stops) stops").font(.system(size: 12)).foregroundStyle(muted)
-                        }.frame(maxWidth: .infinity, maxHeight: .infinity)
-                        CardBox { Lbl(t: "Tire temps"); TireGrid(p: m.packet).frame(maxHeight: .infinity) }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                        .frame(maxWidth: geo.size.width * 0.42, maxHeight: .infinity)
+                        CardBox(fillHeight: true) {
+                            Lbl(t: "Tire temps")
+                            TireGrid(p: m.packet)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(8)
                 } else {
                     ScrollView {
                         VStack(spacing: 8) {
@@ -128,11 +137,16 @@ struct SimpleView: View {
                                 Text("\(m.lapsRemaining.map { String(format: "%.1f laps remaining", $0) } ?? "— laps remaining")")
                                 Text(m.stops == 1 ? "1 stop" : "\(m.stops) stops").font(.system(size: 12)).foregroundStyle(muted)
                             }
-                            CardBox { Lbl(t: "Tire temps"); TireGrid(p: m.packet).frame(height: 260) }
+                            CardBox(fillHeight: true) {
+                                Lbl(t: "Tire temps")
+                                TireGrid(p: m.packet)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            }
+                            .frame(height: 280)
                         }.padding(8)
                     }
                 }
-            }.padding(land ? 8 : 0)
+            }
         }
     }
 }
@@ -141,18 +155,30 @@ struct TireGrid: View {
     let p: TelemetryPacket?
     var body: some View {
         let cells: [(String, Float)] = [("FL", p?.tireFL ?? 0), ("FR", p?.tireFR ?? 0), ("RL", p?.tireRL ?? 0), ("RR", p?.tireRR ?? 0)]
-        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-            ForEach(cells, id: \.0) { k, v in
-                VStack {
-                    Text(k).font(.system(size: 11)).foregroundStyle(muted)
-                    Text(String(format: "%.0f°C", v)).font(.system(size: 28, weight: .semibold))
-                        .foregroundStyle(v >= 100 ? red : green)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(tireBg)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                tireCell(cells[0])
+                tireCell(cells[1])
             }
+            .frame(maxHeight: .infinity)
+            HStack(spacing: 8) {
+                tireCell(cells[2])
+                tireCell(cells[3])
+            }
+            .frame(maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func tireCell(_ item: (String, Float)) -> some View {
+        VStack(spacing: 4) {
+            Text(item.0).font(.system(size: 11)).foregroundStyle(muted)
+            Text(String(format: "%.0f°C", item.1)).font(.system(size: 28, weight: .semibold))
+                .foregroundStyle(item.1 >= 100 ? red : green)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(tireBg)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 }
 
@@ -176,7 +202,8 @@ struct DrivingView: View {
                             VStack(spacing: 8) {
                                 deltaCard
                                 fuelCard
-                                CardBox { Lbl(t: "Tire temps"); TireGrid(p: p).frame(height: 180) }
+                                CardBox(fillHeight: true) { Lbl(t: "Tire temps"); TireGrid(p: p).frame(maxWidth: .infinity, maxHeight: .infinity) }
+                                .frame(minHeight: 180)
                             }
                         }.frame(maxWidth: .infinity)
                     }.padding(8)
@@ -188,7 +215,8 @@ struct DrivingView: View {
                             throttleBrakeCard
                             deltaCard
                             fuelCard
-                            CardBox { Lbl(t: "Tire temps"); TireGrid(p: p).frame(height: 220) }
+                            CardBox(fillHeight: true) { Lbl(t: "Tire temps"); TireGrid(p: p).frame(maxWidth: .infinity, maxHeight: .infinity) }
+                            .frame(height: 220)
                         }.padding(8)
                     }
                 }
@@ -285,7 +313,8 @@ struct PitWallView: View {
                         VStack { Lbl(t: "Laps in memory"); Text("\(m.lapsInMemory)") }
                     }
                 }
-                CardBox { Lbl(t: "Tire temps"); TireGrid(p: p).frame(height: 160) }
+                CardBox(fillHeight: true) { Lbl(t: "Tire temps"); TireGrid(p: p).frame(maxWidth: .infinity, maxHeight: .infinity) }
+                .frame(height: 180)
                 CardBox {
                     Lbl(t: "Fuel — this session")
                     HStack {
