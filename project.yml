@@ -31,6 +31,8 @@ targets:
       - target: SlickDash
     settings:
       base:
+        PRODUCT_NAME: SlickDashTests
+        PRODUCT_MODULE_NAME: SlickDashTests
         PRODUCT_BUNDLE_IDENTIFIER: com.robfraser.slickdash.tests
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGNING_ALLOWED: "NO"
