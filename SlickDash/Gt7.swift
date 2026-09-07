@@ -75,11 +75,13 @@ struct TelemetryPacket {
     static let minSize = 0x128
     var posX, posZ, rpm, fuelLevel, fuelCapacity, speedMps: Float
     var tireFL, tireFR, tireRL, tireRR: Float
-    var currentLap, bestLapMs, lastLapMs, alertMaxRpm, flags, gear, throttle, brake: Int
+    var currentLap, totalLaps, bestLapMs, lastLapMs, alertMaxRpm, flags, gear, throttle, brake, carCode: Int
     var speedKph: Double { Double(speedMps) * 3.6 }
     var fuelPercent: Double { fuelCapacity > 0 ? Double(fuelLevel / fuelCapacity) * 100 : Double(fuelLevel) }
     var throttlePct: Int { Int(Double(throttle) / 255 * 100) }
     var brakePct: Int { Int(Double(brake) / 255 * 100) }
+    var throttleNorm: Double { Double(throttle) / 255 }
+    var brakeNorm: Double { Double(brake) / 255 }
     var rpmFrac: Float { min(1, max(0, rpm / Float(max(alertMaxRpm, 1)))) }
     var gearDisplay: String { switch gear { case 0: return "R"; case 15: return "N"; default: return "\(gear)" } }
     /// Car on track, not paused, not loading — same as Windows IsRacing.
@@ -99,8 +101,18 @@ struct TelemetryPacket {
         let gears = Int(p[0x90])
         return TelemetryPacket(posX: f(0x04), posZ: f(0x0C), rpm: f(0x3C), fuelLevel: f(0x44), fuelCapacity: f(0x48),
             speedMps: f(0x4C), tireFL: f(0x60), tireFR: f(0x64), tireRL: f(0x68), tireRR: f(0x6C),
-            currentLap: i16(0x74), bestLapMs: i32(0x78), lastLapMs: i32(0x7C), alertMaxRpm: i16(0x8A),
-            flags: i16(0x8E), gear: gears & 0x0F, throttle: Int(p[0x91]), brake: Int(p[0x92]))
+            currentLap: i16(0x74), totalLaps: i16(0x76), bestLapMs: i32(0x78), lastLapMs: i32(0x7C),
+            alertMaxRpm: i16(0x8A), flags: i16(0x8E), gear: gears & 0x0F, throttle: Int(p[0x91]), brake: Int(p[0x92]),
+            carCode: p.count >= 0x128 ? i32(0x124) : 0)
+    }
+}
+
+enum QualityRating: String { case poor = "Poor"; case fair = "Fair"; case good = "Good"
+    static func classify(packetsPerSecond: Double, errorRatio: Double) -> QualityRating {
+        let err = min(1, max(0, errorRatio))
+        if packetsPerSecond >= 40 && err < 0.08 { return .good }
+        if packetsPerSecond >= 12 && err < 0.25 { return .fair }
+        return .poor
     }
 }
 
@@ -276,85 +288,87 @@ final class Gt7UdpClient {
 struct LapRow: Identifiable { let id = UUID(); let lap: Int; let timeMs: Int; let isBest: Bool }
 
 final class SessionTracker {
+    private static let flyerPathFraction = 0.85
+    private static let maxMatchDistanceM = 32.0
+
     private var laps: [LapRow] = []
     private var lastLapIndex = -1
     private var lastLapMsSeen = 0
     private var completedFlying = 0
     private var fuelAtStart: Double?
-    private var fuelPerLap: Double?
+    private var fuelSamples: [Double] = []
     private var ghost: [(Float, Float, Float)] = []
     private var current: [(Float, Float, Float)] = []
     private var lapT0 = Date()
+    private var pauseStarted: Date?
     private var trace: [Float] = []
     private var heldDelta: Double?
     private var ghostMatchIndex = -1
+    private var ghostBestMs = 0
+    private var ghostPathM = 0.0
+    private var maxPathM = 0.0
     private var lastSampleX: Float?
     private var lastSampleZ: Float?
+    private var carCode = 0
+    private var hasCarCode = false
     private(set) var bestMs: Int?
 
+    private var fuelPerLap: Double? {
+        guard !fuelSamples.isEmpty else { return nil }
+        return fuelSamples.reduce(0, +) / Double(fuelSamples.count)
+    }
+
     private func resetStint() {
-        laps = []
-        lastLapIndex = -1
-        lastLapMsSeen = 0
-        completedFlying = 0
-        fuelAtStart = nil
-        fuelPerLap = nil
-        ghost = []
-        current = []
-        lapT0 = Date()
-        trace = []
-        heldDelta = nil
-        ghostMatchIndex = -1
-        lastSampleX = nil
-        lastSampleZ = nil
-        bestMs = nil
+        laps = []; lastLapIndex = -1; lastLapMsSeen = 0; completedFlying = 0
+        fuelAtStart = nil; fuelSamples = []; ghost = []; current = []
+        lapT0 = Date(); pauseStarted = nil; trace = []; heldDelta = nil
+        ghostMatchIndex = -1; ghostBestMs = 0; ghostPathM = 0; maxPathM = 0
+        lastSampleX = nil; lastSampleZ = nil; bestMs = nil
     }
 
     func onPacket(_ p: TelemetryPacket) -> (
         fuelPerLap: Double?, rem: Double?, stops: Int, last: Int?, best: Int?,
         delta: Double?, trace: [Float], laps: [LapRow], count: Int
     ) {
-        if lastLapIndex >= 0 && p.currentLap >= 0 && p.currentLap < lastLapIndex {
-            resetStint()
-        }
+        if hasCarCode && p.carCode != 0 && p.carCode != carCode { resetStint() }
+        if !hasCarCode && p.carCode != 0 { carCode = p.carCode; hasCarCode = true }
+        if lastLapIndex >= 0 && p.currentLap >= 0 && p.currentLap < lastLapIndex { resetStint() }
 
-        // Menus / pause / loading: keep table, freeze live delta & path sampling (Windows parity).
         if !p.isRacing {
+            if pauseStarted == nil { pauseStarted = Date() }
             heldDelta = nil
             ghostMatchIndex = -1
-            let rem = (fuelPerLap ?? 0) > 0.05 ? p.fuelPercent / (fuelPerLap ?? 1) : nil
-            return (fuelPerLap, rem, (rem ?? 99) < 8 ? 1 : 0,
-                    p.lastLapMs > 0 ? p.lastLapMs : nil, bestMs,
-                    nil, [], Array(laps.suffix(12)), laps.count)
+            let fpl = fuelPerLap
+            let rem = (fpl ?? 0) > 0.05 ? p.fuelPercent / (fpl ?? 1) : nil
+            return (fpl, rem, predictedStops(fuelPct: p.fuelPercent, rem: rem, totalLaps: p.totalLaps, currentLap: p.currentLap),
+                    p.lastLapMs > 0 ? p.lastLapMs : nil, bestMs, nil, [], Array(laps.suffix(12)), laps.count)
+        }
+
+        if let ps = pauseStarted {
+            lapT0 = lapT0.addingTimeInterval(Date().timeIntervalSince(ps))
+            pauseStarted = nil
+            ghostMatchIndex = ghost.isEmpty ? -1 : 0
         }
 
         if p.currentLap != lastLapIndex {
             if lastLapIndex >= 0 && p.lastLapMs > 0 && p.lastLapMs != lastLapMsSeen {
                 completedFlying += 1
-                if completedFlying > 1 {
-                    laps.append(LapRow(lap: lastLapIndex, timeMs: p.lastLapMs, isBest: false))
-                    if laps.count > 100 { laps.removeFirst() }
-                    relabelBest()
-                    if bestMs == p.lastLapMs && current.count >= 2 {
-                        ghost = current
-                        ghostMatchIndex = -1
-                        heldDelta = nil
-                        trace = []
-                    }
-                }
-                lastLapMsSeen = p.lastLapMs
                 if let s = fuelAtStart {
                     let used = max(0, s - p.fuelPercent)
-                    if used > 0.2 { fuelPerLap = used }
+                    if used > 0.3 && used < 25 {
+                        fuelSamples.append(used)
+                        if fuelSamples.count > 12 { fuelSamples.removeFirst() }
+                    }
                 }
+                if completedFlying > 1 {
+                    recordFlyer(lap: lastLapIndex, timeMs: p.lastLapMs)
+                }
+                lastLapMsSeen = p.lastLapMs
             }
             lastLapIndex = p.currentLap
             fuelAtStart = p.fuelPercent
-            current = []
-            lastSampleX = nil
-            lastSampleZ = nil
+            current = []; lastSampleX = nil; lastSampleZ = nil
             lapT0 = Date()
-            // Keep ghostMatchIndex across flying laps so delta stays locked to the path.
             heldDelta = nil
         }
 
@@ -366,9 +380,45 @@ final class SessionTracker {
             trace.append(Float(d))
             if trace.count > 120 { trace.removeFirst() }
         }
-        let rem = (fuelPerLap ?? 0) > 0.05 ? p.fuelPercent / (fuelPerLap ?? 1) : nil
-        return (fuelPerLap, rem, (rem ?? 99) < 8 ? 1 : 0, p.lastLapMs > 0 ? p.lastLapMs : nil,
-                bestMs, d, Array(trace), Array(laps.suffix(12)), laps.count)
+        let fpl = fuelPerLap
+        let rem = (fpl ?? 0) > 0.05 ? p.fuelPercent / (fpl ?? 1) : nil
+        return (fpl, rem, predictedStops(fuelPct: p.fuelPercent, rem: rem, totalLaps: p.totalLaps, currentLap: p.currentLap),
+                p.lastLapMs > 0 ? p.lastLapMs : nil, bestMs, d ?? heldDelta, Array(trace), Array(laps.suffix(12)), laps.count)
+    }
+
+    private func predictedStops(fuelPct: Double, rem: Double?, totalLaps: Int, currentLap: Int) -> Int {
+        let fpl = fuelPerLap ?? 2.1
+        let raceLeft = totalLaps > 0 ? max(0, totalLaps - max(currentLap, 0)) : 0
+        if raceLeft <= 0 {
+            return (fuelPct < 50 && (rem ?? 99) < 8) ? 1 : 0
+        }
+        let need = Double(raceLeft) * fpl
+        let extra = need - fuelPct
+        return extra <= 0.5 ? 0 : Int((extra / 100.0).rounded(.up))
+    }
+
+    private func recordFlyer(lap: Int, timeMs: Int) {
+        if let last = current.indices.last {
+            current[last].2 = Float(timeMs) / 1000
+        }
+        let path = pathLengthM(current)
+        laps.append(LapRow(lap: lap, timeMs: timeMs, isBest: false))
+        if laps.count > 100 { laps.removeFirst() }
+        relabelBest()
+
+        let eligible = current.count >= 2 && timeMs > 0
+        if eligible {
+            if path > maxPathM { maxPathM = path }
+            let install = ghost.count < 2
+                || (timeMs < ghostBestMs && path >= Self.flyerPathFraction * ghostPathM)
+            if install {
+                ghost = current
+                ghostBestMs = timeMs
+                ghostPathM = path
+            }
+        }
+        ghostMatchIndex = ghost.isEmpty ? -1 : 0
+        current = []
     }
 
     private func relabelBest() {
@@ -384,46 +434,42 @@ final class SessionTracker {
 
     private func appendSample(x: Float, z: Float, t: Float) {
         if let lx = lastSampleX, let lz = lastSampleZ {
-            let dist = hypot(Double(x - lx), Double(z - lz))
-            if dist < 1.0 { return }
+            if hypot(Double(x - lx), Double(z - lz)) < 1.0 { return }
         }
         current.append((x, z, t))
-        lastSampleX = x
-        lastSampleZ = z
+        lastSampleX = x; lastSampleZ = z
         if current.count > 4096 { current.removeFirst() }
     }
 
+    private func pathLengthM(_ samples: [(Float, Float, Float)]) -> Double {
+        guard samples.count > 1 else { return 0 }
+        var sum = 0.0
+        for i in 1..<samples.count {
+            sum += hypot(Double(samples[i].0 - samples[i-1].0), Double(samples[i].1 - samples[i-1].1))
+        }
+        return sum
+    }
+
     private func liveDelta(x: Float, z: Float, t: Float) -> Double? {
-        let n = ghost.count
-        guard n >= 2 else { return nil }
-        guard let idx = findGhostMatch(x: x, z: z, elapsed: t) else {
-            return nil
-        }
+        guard ghost.count >= 2, let idx = findGhostMatch(x: x, z: z, elapsed: t) else { return nil }
         let g = ghost[idx]
-        let dist = hypot(Double(g.0 - x), Double(g.1 - z))
-        if dist > 32 {
-            return nil
-        }
+        if hypot(Double(g.0 - x), Double(g.1 - z)) > Self.maxMatchDistanceM { return nil }
         ghostMatchIndex = idx
         let d = Double(t - g.2)
-        // Reject absurd first locks (start/finish XZ collision) until elapsed agrees.
-        if abs(d) > 30 && ghostMatchIndex < n / 10 {
-            // still early on the lap but matched a far-time ghost point — unlock and retry next packet
+        if abs(d) > 30 && idx < max(2, ghost.count / 10) {
             ghostMatchIndex = -1
             return nil
         }
         return d
     }
 
-    /// Windows-style: search near the last match; among nearby XZ points prefer similar elapsed.
     private func findGhostMatch(x: Float, z: Float, elapsed: Float) -> Int? {
         let n = ghost.count
         guard n > 0 else { return nil }
         let start: Int
         let count: Int
         if ghostMatchIndex < 0 {
-            start = 0
-            count = n
+            start = 0; count = n
         } else {
             let fwd = min(n, max(32, n / 8))
             let back = min(n, max(8, n / 32))
@@ -435,13 +481,9 @@ final class SessionTracker {
         for i in 0..<count {
             let idx = (start + i) % n
             let g = ghost[idx]
-            let dx = Double(g.0 - x)
-            let dz = Double(g.1 - z)
-            let d = dx * dx + dz * dz
-            if d < bestDistSq {
-                bestDistSq = d
-                bestIdx = idx
-            }
+            let d = hypot(Double(g.0 - x), Double(g.1 - z))
+            let dsq = d * d
+            if dsq < bestDistSq { bestDistSq = dsq; bestIdx = idx }
         }
         guard bestIdx >= 0 else { return nil }
         let near = bestDistSq + 16
@@ -450,15 +492,10 @@ final class SessionTracker {
         for i in 0..<count {
             let idx = (start + i) % n
             let g = ghost[idx]
-            let dx = Double(g.0 - x)
-            let dz = Double(g.1 - z)
-            let d = dx * dx + dz * dz
-            if d > near { continue }
+            let dsq = pow(Double(g.0 - x), 2) + pow(Double(g.1 - z), 2)
+            if dsq > near { continue }
             let err = abs(Double(elapsed) - Double(g.2))
-            if err < bestElapsedErr {
-                bestElapsedErr = err
-                chosen = idx
-            }
+            if err < bestElapsedErr { bestElapsedErr = err; chosen = idx }
         }
         return chosen
     }

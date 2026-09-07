@@ -238,8 +238,10 @@ struct DrivingView: View {
         CardBox {
             HStack { Lbl(t: "Throttle"); Spacer(); Text("\(p?.throttlePct ?? 0)%").foregroundStyle(green) }
             Bar(frac: CGFloat(p?.throttlePct ?? 0)/100, color: Color(red: 0.086, green: 0.396, blue: 0.204))
+            InputTrace(samples: m.throttleTrace, color: green).frame(height: 28)
             HStack { Lbl(t: "Brake"); Spacer(); Text("\(p?.brakePct ?? 0)%").foregroundStyle(muted) }
             Bar(frac: CGFloat(p?.brakePct ?? 0)/100, color: red)
+            InputTrace(samples: m.brakeTrace, color: red).frame(height: 28)
         }
     }
 
@@ -262,7 +264,11 @@ struct DrivingView: View {
             Text(String(format: "%.0f%%", m.fuelPct)).font(.system(size: 22, weight: .semibold))
             Bar(frac: CGFloat(m.fuelPct/100), color: amber)
             Text(m.fuelPerLap.map { String(format: "%.1f%%/lap", $0) } ?? "—%/lap")
-            Text("\(m.lapsRemaining.map { String(format: "%.1f", $0) } ?? "—") laps · \(m.stops) stop")
+            Text({
+                let rem = m.lapsRemaining.map { String(format: "%.1f", $0) } ?? "—"
+                let stops = m.stops == 1 ? "1 stop" : "\(m.stops) stops"
+                return "\(rem) laps · \(stops)"
+            }())
                 .foregroundStyle(muted).font(.system(size: 12))
         }
     }
@@ -364,6 +370,27 @@ struct DeltaTrace: View {
     }
 }
 
+struct InputTrace: View {
+    let samples: [Float]
+    let color: Color
+    var body: some View {
+        Canvas { ctx, size in
+            guard samples.count > 1 else { return }
+            var p = Path()
+            for (i, v) in samples.enumerated() {
+                let x = size.width * CGFloat(i) / CGFloat(samples.count - 1)
+                let y = size.height * (1 - CGFloat(min(1, max(0, v))))
+                if i == 0 { p.move(to: CGPoint(x: x, y: y)) } else { p.addLine(to: CGPoint(x: x, y: y)) }
+            }
+            ctx.stroke(p, with: .color(color), lineWidth: 1.5)
+        }.background(tireBg).clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+}
+
+private func qualityFrac(_ q: QualityRating) -> CGFloat {
+    switch q { case .good: return 0.92; case .fair: return 0.55; case .poor: return 0.2 }
+}
+
 struct SettingsSheet: View {
     @EnvironmentObject var m: DashModel
     var body: some View {
@@ -383,8 +410,9 @@ struct SettingsSheet: View {
                         Spacer()
                         Text(m.peer == nil ? "Idle" : "Connected").font(.system(size: 11, weight: .bold)).foregroundStyle(green)
                     }
-                    Bar(frac: m.peer == nil ? 0 : 0.86, color: cyan)
-                    Text("rx \(m.rx)   dec \(m.dec)   err \(m.err)").font(.system(size: 12)).foregroundStyle(muted)
+                    Bar(frac: m.peer == nil ? 0 : qualityFrac(m.quality), color: cyan)
+                    Text("\(m.quality.rawValue) · rx \(m.rx)   dec \(m.dec)   err \(m.err)")
+                        .font(.system(size: 12)).foregroundStyle(muted)
                 }
                 Button(action: { m.showIp.toggle() }) {
                     Text("Enter IP manually").foregroundStyle(cyan).frame(maxWidth: .infinity).padding(8)
