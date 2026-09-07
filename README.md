@@ -10,7 +10,7 @@ Not affiliated with Sony Interactive Entertainment or Polyphony Digital.
 | --- | --- | --- |
 | ![Simple](docs/screenshots/simple.png) | ![Driving](docs/screenshots/driving.png) | ![Pit wall](docs/screenshots/pit-wall.png) |
 
-Samsung Galaxy A17 portrait captures (Simple / Driving / Pit wall). Same modes as iOS; IDLE session — UI layout only.
+Interim companion shots for Simple / Driving / Pit wall (IDLE UI layout). Swap for device/Simulator captures before App Store listing.
 
 ## Run
 
