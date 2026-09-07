@@ -8,6 +8,7 @@ settings:
     PRODUCT_NAME: SlickDash
     INFOPLIST_KEY_CFBundleDisplayName: SlickDash
     INFOPLIST_KEY_NSLocalNetworkUsageDescription: SlickDash finds a PlayStation 5 on your Wi-Fi to read Gran Turismo 7 telemetry.
+    INFOPLIST_KEY_NSBonjourServices: "_gt7._udp"
     INFOPLIST_KEY_UILaunchScreen_Generation: true
     INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait"
     GENERATE_INFOPLIST_FILE: YES

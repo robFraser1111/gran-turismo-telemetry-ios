@@ -1,5 +1,4 @@
 import Foundation
-import Network
 
 enum Salsa20 {
     static let sigma = Array("expand 32-byte k".utf8)
@@ -76,14 +75,20 @@ struct TelemetryPacket {
     static let minSize = 0x128
     var posX, posZ, rpm, fuelLevel, fuelCapacity, speedMps: Float
     var tireFL, tireFR, tireRL, tireRR: Float
-    var currentLap, bestLapMs, lastLapMs, alertMaxRpm, flags, gear, throttle, brake: Int
+    var currentLap, totalLaps, bestLapMs, lastLapMs, alertMaxRpm, flags, gear, throttle, brake, carCode: Int
     var speedKph: Double { Double(speedMps) * 3.6 }
     var fuelPercent: Double { fuelCapacity > 0 ? Double(fuelLevel / fuelCapacity) * 100 : Double(fuelLevel) }
     var throttlePct: Int { Int(Double(throttle) / 255 * 100) }
     var brakePct: Int { Int(Double(brake) / 255 * 100) }
+    var throttleNorm: Double { Double(throttle) / 255 }
+    var brakeNorm: Double { Double(brake) / 255 }
     var rpmFrac: Float { min(1, max(0, rpm / Float(max(alertMaxRpm, 1)))) }
     var gearDisplay: String { switch gear { case 0: return "R"; case 15: return "N"; default: return "\(gear)" } }
+    /// Car on track, not paused, not loading — same as Windows IsRacing.
     var onTrack: Bool { flags & 1 != 0 && flags & 2 == 0 && flags & 4 == 0 }
+    var isPaused: Bool { flags & 2 != 0 }
+    var isLoading: Bool { flags & 4 != 0 }
+    var isRacing: Bool { onTrack }
     static func parse(_ p: [UInt8]) -> TelemetryPacket {
         func f(_ o: Int) -> Float {
             var v: UInt32 = UInt32(p[o]) | UInt32(p[o+1])<<8 | UInt32(p[o+2])<<16 | UInt32(p[o+3])<<24
@@ -96,154 +101,403 @@ struct TelemetryPacket {
         let gears = Int(p[0x90])
         return TelemetryPacket(posX: f(0x04), posZ: f(0x0C), rpm: f(0x3C), fuelLevel: f(0x44), fuelCapacity: f(0x48),
             speedMps: f(0x4C), tireFL: f(0x60), tireFR: f(0x64), tireRL: f(0x68), tireRR: f(0x6C),
-            currentLap: i16(0x74), bestLapMs: i32(0x78), lastLapMs: i32(0x7C), alertMaxRpm: i16(0x8A),
-            flags: i16(0x8E), gear: gears & 0x0F, throttle: Int(p[0x91]), brake: Int(p[0x92]))
+            currentLap: i16(0x74), totalLaps: i16(0x76), bestLapMs: i32(0x78), lastLapMs: i32(0x7C),
+            alertMaxRpm: i16(0x8A), flags: i16(0x8E), gear: gears & 0x0F, throttle: Int(p[0x91]), brake: Int(p[0x92]),
+            carCode: p.count >= 0x128 ? i32(0x124) : 0)
+    }
+}
+
+enum QualityRating: String { case poor = "Poor"; case fair = "Fair"; case good = "Good"
+    static func classify(packetsPerSecond: Double, errorRatio: Double) -> QualityRating {
+        let err = min(1, max(0, errorRatio))
+        if packetsPerSecond >= 40 && err < 0.08 { return .good }
+        if packetsPerSecond >= 12 && err < 0.25 { return .fair }
+        return .poor
     }
 }
 
 final class Gt7UdpClient {
-    static let sendPort: NWEndpoint.Port = 33739
-    static let recvPort: NWEndpoint.Port = 33740
-    private var conn: NWConnection?
-    private var listener: NWListener?
+    static let sendPort: UInt16 = 33739
+    static let recvPort: UInt16 = 33740
     var onPacket: ((TelemetryPacket) -> Void)?
     var onRaw: (() -> Void)?
     var onErr: (() -> Void)?
     var onPeer: ((String) -> Void)?
     var onStatus: ((String) -> Void)?
-    private var peer: String?
-    private var hb: DispatchSourceTimer?
+
     private let queue = DispatchQueue(label: "gt7.udp")
+    private var running = false
+    private var sock: Int32 = -1
+    private var peer: String?
     private var discovering = false
-    private var broadcastConn: NWConnection?
+    private var heartbeatTargets: [String] = []
 
     func startDiscover() {
         stop()
         discovering = true
         peer = nil
+        heartbeatTargets = Self.broadcastAddresses()
         onStatus?("Looking for GT7 on this network…")
-        bindReceive()
-        heartbeat(to: "255.255.255.255")
+        startLoop()
     }
+
     func startHost(_ ip: String) {
         stop()
         discovering = false
         peer = ip
+        heartbeatTargets = [ip]
         onStatus?("Heartbeat → \(ip)")
-        bindReceive()
-        heartbeat(to: ip)
+        startLoop()
     }
+
     func stop() {
-        hb?.cancel(); hb = nil
-        listener?.cancel(); listener = nil
-        broadcastConn?.cancel(); broadcastConn = nil
-        conn?.cancel(); conn = nil
+        running = false
+        let fd = sock
+        sock = -1
+        if fd >= 0 { Darwin.close(fd) }
     }
-    private func bindReceive() {
-        do {
-            let l = try NWListener(using: .udp, on: Self.recvPort)
-            l.newConnectionHandler = { [weak self] c in
-                c.start(queue: self?.queue ?? .main)
-                self?.receive(c)
+
+    private func startLoop() {
+        running = true
+        queue.async { [weak self] in self?.runLoop() }
+    }
+
+    private func runLoop() {
+        let fd = Darwin.socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+        guard fd >= 0 else {
+            DispatchQueue.main.async { self.onStatus?("UDP socket failed") }
+            return
+        }
+        sock = fd
+        var yes: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+        setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &yes, socklen_t(MemoryLayout<Int32>.size))
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = Self.sendPort.bigEndian // placeholder; set recv below
+        addr.sin_port = Self.recvPort.bigEndian
+        addr.sin_addr = in_addr(s_addr: INADDR_ANY.bigEndian)
+        let bindOk: Bool = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
             }
-            l.start(queue: queue)
-            listener = l
-        } catch {
-            onStatus?("bind :33740 failed: \(error.localizedDescription)")
         }
-    }
-    private func heartbeat(to host: String) {
-        let c = NWConnection(host: NWEndpoint.Host(host), port: Self.sendPort, using: .udp)
-        c.start(queue: queue)
-        broadcastConn = c
-        let t = DispatchSource.makeTimerSource(queue: queue)
-        t.schedule(deadline: .now(), repeating: 0.25)
-        t.setEventHandler { [weak self] in
-            guard let self else { return }
-            let dest = self.peer ?? host
-            let conn = NWConnection(host: NWEndpoint.Host(dest), port: Self.sendPort, using: .udp)
-            conn.start(queue: self.queue)
-            conn.send(content: Data([UInt8(ascii: "A")]), completion: .contentProcessed { _ in conn.cancel() })
+        guard bindOk else {
+            DispatchQueue.main.async { self.onStatus?("bind :33740 failed") }
+            Darwin.close(fd)
+            if sock == fd { sock = -1 }
+            return
         }
-        t.resume()
-        hb = t
-    }
-    private func receive(_ c: NWConnection) {
-        c.receiveMessage { [weak self] data, _, _, _ in
-            defer { self?.receive(c) }
-            guard let self, let data, !data.isEmpty else { return }
-            self.onRaw?()
-            let bytes = [UInt8](data)
-            guard let pkt = Gt7Crypto.tryDecode(bytes) else { self.onErr?(); return }
-            if self.peer == nil {
-                if case let .hostPort(host, _) = c.endpoint {
-                    let ip = "\(host)"
-                    self.peer = ip
-                    self.discovering = false
-                    DispatchQueue.main.async { self.onPeer?(ip); self.onStatus?("Connected \(ip)") }
+
+        var tv = timeval(tv_sec: 0, tv_usec: 50_000)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
+        var lastHb = Date.distantPast
+        var buf = [UInt8](repeating: 0, count: 4096)
+        while running {
+            let now = Date()
+            if now.timeIntervalSince(lastHb) > 0.25 {
+                lastHb = now
+                let targets: [String]
+                if let peer {
+                    targets = [peer]
+                } else {
+                    targets = heartbeatTargets.isEmpty ? ["255.255.255.255"] : heartbeatTargets
+                }
+                for host in targets {
+                    Self.sendHeartbeat(fd: fd, host: host, port: Self.sendPort)
+                }
+            }
+
+            var src = sockaddr_in()
+            var srcLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let n: Int = withUnsafeMutablePointer(to: &src) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                    Darwin.recvfrom(fd, &buf, buf.count, 0, sa, &srcLen)
+                }
+            }
+            guard n > 0 else { continue }
+            DispatchQueue.main.async { self.onRaw?() }
+            let bytes = Array(buf.prefix(n))
+            guard let pkt = Gt7Crypto.tryDecode(bytes) else {
+                DispatchQueue.main.async { self.onErr?() }
+                continue
+            }
+            if peer == nil {
+                let ip = Self.ipString(src.sin_addr)
+                if !ip.isEmpty && ip != "0.0.0.0" {
+                    peer = ip
+                    discovering = false
+                    DispatchQueue.main.async {
+                        self.onPeer?(ip)
+                        self.onStatus?("Connected \(ip)")
+                    }
                 }
             }
             DispatchQueue.main.async { self.onPacket?(pkt) }
         }
+        if sock == fd {
+            Darwin.close(fd)
+            sock = -1
+        }
+    }
+
+    private static func sendHeartbeat(fd: Int32, host: String, port: UInt16) {
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        guard host.withCString({ inet_pton(AF_INET, $0, &addr.sin_addr) }) == 1 else { return }
+        var payload: [UInt8] = [UInt8(ascii: "A")]
+        _ = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                Darwin.sendto(fd, &payload, 1, 0, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+    }
+
+    private static func ipString(_ addr: in_addr) -> String {
+        var addr = addr
+        var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        guard inet_ntop(AF_INET, &addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil else { return "" }
+        return String(cString: buf)
+    }
+
+    /// Global broadcast plus per-interface directed broadcasts (matches Android).
+    private static func broadcastAddresses() -> [String] {
+        var out: [String] = ["255.255.255.255"]
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return out }
+        defer { freeifaddrs(ifaddr) }
+        var ptr: UnsafeMutablePointer<ifaddrs>? = first
+        while let p = ptr {
+            defer { ptr = p.pointee.ifa_next }
+            let flags = Int32(p.pointee.ifa_flags)
+            guard (flags & IFF_UP) != 0, (flags & IFF_LOOPBACK) == 0 else { continue }
+            guard let dst = p.pointee.ifa_dstaddr else { continue }
+            guard dst.pointee.sa_family == sa_family_t(AF_INET) else { continue }
+            let broad = dst.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
+            let ip = ipString(broad)
+            if !ip.isEmpty { out.append(ip) }
+        }
+        return Array(Set(out)).sorted()
     }
 }
 
 struct LapRow: Identifiable { let id = UUID(); let lap: Int; let timeMs: Int; let isBest: Bool }
 
 final class SessionTracker {
+    private static let flyerPathFraction = 0.85
+    private static let maxMatchDistanceM = 32.0
+
     private var laps: [LapRow] = []
     private var lastLapIndex = -1
+    private var lastLapMsSeen = 0
     private var completedFlying = 0
     private var fuelAtStart: Double?
-    private var fuelPerLap: Double?
+    private var fuelSamples: [Double] = []
     private var ghost: [(Float, Float, Float)] = []
     private var current: [(Float, Float, Float)] = []
     private var lapT0 = Date()
+    private var pauseStarted: Date?
     private var trace: [Float] = []
+    private var heldDelta: Double?
+    private var ghostMatchIndex = -1
+    private var ghostBestMs = 0
+    private var ghostPathM = 0.0
+    private var maxPathM = 0.0
+    private var lastSampleX: Float?
+    private var lastSampleZ: Float?
+    private var carCode = 0
+    private var hasCarCode = false
     private(set) var bestMs: Int?
+
+    private var fuelPerLap: Double? {
+        guard !fuelSamples.isEmpty else { return nil }
+        return fuelSamples.reduce(0, +) / Double(fuelSamples.count)
+    }
+
+    private func resetStint() {
+        laps = []; lastLapIndex = -1; lastLapMsSeen = 0; completedFlying = 0
+        fuelAtStart = nil; fuelSamples = []; ghost = []; current = []
+        lapT0 = Date(); pauseStarted = nil; trace = []; heldDelta = nil
+        ghostMatchIndex = -1; ghostBestMs = 0; ghostPathM = 0; maxPathM = 0
+        lastSampleX = nil; lastSampleZ = nil; bestMs = nil
+    }
+
     func onPacket(_ p: TelemetryPacket) -> (
         fuelPerLap: Double?, rem: Double?, stops: Int, last: Int?, best: Int?,
         delta: Double?, trace: [Float], laps: [LapRow], count: Int
     ) {
+        if hasCarCode && p.carCode != 0 && p.carCode != carCode { resetStint() }
+        if !hasCarCode && p.carCode != 0 { carCode = p.carCode; hasCarCode = true }
+        if lastLapIndex >= 0 && p.currentLap >= 0 && p.currentLap < lastLapIndex { resetStint() }
+
+        if !p.isRacing {
+            if pauseStarted == nil { pauseStarted = Date() }
+            heldDelta = nil
+            ghostMatchIndex = -1
+            let fpl = fuelPerLap
+            let rem = (fpl ?? 0) > 0.05 ? p.fuelPercent / (fpl ?? 1) : nil
+            return (fpl, rem, predictedStops(fuelPct: p.fuelPercent, rem: rem, totalLaps: p.totalLaps, currentLap: p.currentLap),
+                    p.lastLapMs > 0 ? p.lastLapMs : nil, bestMs, nil, [], Array(laps.suffix(12)), laps.count)
+        }
+
+        if let ps = pauseStarted {
+            lapT0 = lapT0.addingTimeInterval(Date().timeIntervalSince(ps))
+            pauseStarted = nil
+            ghostMatchIndex = ghost.isEmpty ? -1 : 0
+        }
+
         if p.currentLap != lastLapIndex {
-            if lastLapIndex >= 0 && p.lastLapMs > 0 {
+            if lastLapIndex >= 0 && p.lastLapMs > 0 && p.lastLapMs != lastLapMsSeen {
                 completedFlying += 1
-                if completedFlying > 1 {
-                    laps.append(LapRow(lap: lastLapIndex, timeMs: p.lastLapMs, isBest: false))
-                    if laps.count > 100 { laps.removeFirst() }
-                    let best = laps.map(\.timeMs).min()
-                    bestMs = best
-                    laps = laps.map { LapRow(lap: $0.lap, timeMs: $0.timeMs, isBest: best == $0.timeMs) }
-                    if best == p.lastLapMs && current.count >= 2 { ghost = current }
-                }
                 if let s = fuelAtStart {
                     let used = max(0, s - p.fuelPercent)
-                    if used > 0.2 { fuelPerLap = used }
+                    if used > 0.3 && used < 25 {
+                        fuelSamples.append(used)
+                        if fuelSamples.count > 12 { fuelSamples.removeFirst() }
+                    }
                 }
+                if completedFlying > 1 {
+                    recordFlyer(lap: lastLapIndex, timeMs: p.lastLapMs)
+                }
+                lastLapMsSeen = p.lastLapMs
             }
             lastLapIndex = p.currentLap
             fuelAtStart = p.fuelPercent
-            current = []
+            current = []; lastSampleX = nil; lastSampleZ = nil
             lapT0 = Date()
+            heldDelta = nil
         }
+
         let t = Float(Date().timeIntervalSince(lapT0))
-        if p.onTrack { current.append((p.posX, p.posZ, t)) }
+        appendSample(x: p.posX, z: p.posZ, t: t)
         let d = liveDelta(x: p.posX, z: p.posZ, t: t)
-        if let d { trace.append(Float(d)); if trace.count > 120 { trace.removeFirst() } }
-        let rem = (fuelPerLap ?? 0) > 0.05 ? p.fuelPercent / (fuelPerLap ?? 1) : nil
-        return (fuelPerLap, rem, (rem ?? 99) < 8 ? 1 : 0, p.lastLapMs > 0 ? p.lastLapMs : nil,
-                bestMs ?? (p.bestLapMs > 0 ? p.bestLapMs : nil), d, trace, Array(laps.suffix(12)), laps.count)
-    }
-    private func liveDelta(x: Float, z: Float, t: Float) -> Double? {
-        guard ghost.count >= 2, completedFlying >= 1 else { return nil }
-        var best = Double.greatestFiniteMagnitude
-        var gT = ghost[0].2
-        for s in ghost {
-            let d = hypot(Double(s.0 - x), Double(s.1 - z))
-            if d < best { best = d; gT = s.2 }
+        if let d {
+            heldDelta = d
+            trace.append(Float(d))
+            if trace.count > 120 { trace.removeFirst() }
         }
-        if best > 40 { return nil }
-        return Double(t - gT)
+        let fpl = fuelPerLap
+        let rem = (fpl ?? 0) > 0.05 ? p.fuelPercent / (fpl ?? 1) : nil
+        return (fpl, rem, predictedStops(fuelPct: p.fuelPercent, rem: rem, totalLaps: p.totalLaps, currentLap: p.currentLap),
+                p.lastLapMs > 0 ? p.lastLapMs : nil, bestMs, d ?? heldDelta, Array(trace), Array(laps.suffix(12)), laps.count)
+    }
+
+    private func predictedStops(fuelPct: Double, rem: Double?, totalLaps: Int, currentLap: Int) -> Int {
+        let fpl = fuelPerLap ?? 2.1
+        let raceLeft = totalLaps > 0 ? max(0, totalLaps - max(currentLap, 0)) : 0
+        if raceLeft <= 0 {
+            return (fuelPct < 50 && (rem ?? 99) < 8) ? 1 : 0
+        }
+        let need = Double(raceLeft) * fpl
+        let extra = need - fuelPct
+        return extra <= 0.5 ? 0 : Int((extra / 100.0).rounded(.up))
+    }
+
+    private func recordFlyer(lap: Int, timeMs: Int) {
+        if let last = current.indices.last {
+            current[last].2 = Float(timeMs) / 1000
+        }
+        let path = pathLengthM(current)
+        laps.append(LapRow(lap: lap, timeMs: timeMs, isBest: false))
+        if laps.count > 100 { laps.removeFirst() }
+        relabelBest()
+
+        let eligible = current.count >= 2 && timeMs > 0
+        if eligible {
+            if path > maxPathM { maxPathM = path }
+            let install = ghost.count < 2
+                || (timeMs < ghostBestMs && path >= Self.flyerPathFraction * ghostPathM)
+            if install {
+                ghost = current
+                ghostBestMs = timeMs
+                ghostPathM = path
+            }
+        }
+        ghostMatchIndex = ghost.isEmpty ? -1 : 0
+        current = []
+    }
+
+    private func relabelBest() {
+        let best = laps.map(\.timeMs).min()
+        bestMs = best
+        var marked = false
+        laps = laps.map { row in
+            let isBest = !marked && best == row.timeMs
+            if isBest { marked = true }
+            return LapRow(lap: row.lap, timeMs: row.timeMs, isBest: isBest)
+        }
+    }
+
+    private func appendSample(x: Float, z: Float, t: Float) {
+        if let lx = lastSampleX, let lz = lastSampleZ {
+            if hypot(Double(x - lx), Double(z - lz)) < 1.0 { return }
+        }
+        current.append((x, z, t))
+        lastSampleX = x; lastSampleZ = z
+        if current.count > 4096 { current.removeFirst() }
+    }
+
+    private func pathLengthM(_ samples: [(Float, Float, Float)]) -> Double {
+        guard samples.count > 1 else { return 0 }
+        var sum = 0.0
+        for i in 1..<samples.count {
+            sum += hypot(Double(samples[i].0 - samples[i-1].0), Double(samples[i].1 - samples[i-1].1))
+        }
+        return sum
+    }
+
+    private func liveDelta(x: Float, z: Float, t: Float) -> Double? {
+        guard ghost.count >= 2, let idx = findGhostMatch(x: x, z: z, elapsed: t) else { return nil }
+        let g = ghost[idx]
+        if hypot(Double(g.0 - x), Double(g.1 - z)) > Self.maxMatchDistanceM { return nil }
+        ghostMatchIndex = idx
+        let d = Double(t - g.2)
+        if abs(d) > 30 && idx < max(2, ghost.count / 10) {
+            ghostMatchIndex = -1
+            return nil
+        }
+        return d
+    }
+
+    private func findGhostMatch(x: Float, z: Float, elapsed: Float) -> Int? {
+        let n = ghost.count
+        guard n > 0 else { return nil }
+        let start: Int
+        let count: Int
+        if ghostMatchIndex < 0 {
+            start = 0; count = n
+        } else {
+            let fwd = min(n, max(32, n / 8))
+            let back = min(n, max(8, n / 32))
+            start = (ghostMatchIndex - back + n) % n
+            count = min(n, back + fwd + 1)
+        }
+        var bestIdx = -1
+        var bestDistSq = Double.greatestFiniteMagnitude
+        for i in 0..<count {
+            let idx = (start + i) % n
+            let g = ghost[idx]
+            let d = hypot(Double(g.0 - x), Double(g.1 - z))
+            let dsq = d * d
+            if dsq < bestDistSq { bestDistSq = dsq; bestIdx = idx }
+        }
+        guard bestIdx >= 0 else { return nil }
+        let near = bestDistSq + 16
+        var chosen = bestIdx
+        var bestElapsedErr = abs(Double(elapsed) - Double(ghost[bestIdx].2))
+        for i in 0..<count {
+            let idx = (start + i) % n
+            let g = ghost[idx]
+            let dsq = pow(Double(g.0 - x), 2) + pow(Double(g.1 - z), 2)
+            if dsq > near { continue }
+            let err = abs(Double(elapsed) - Double(g.2))
+            if err < bestElapsedErr { bestElapsedErr = err; chosen = idx }
+        }
+        return chosen
     }
 }
 

@@ -33,40 +33,52 @@ struct ContentView: View {
 struct HeaderBar: View {
     @EnvironmentObject var m: DashModel
     var body: some View {
-        HStack(spacing: 8) {
-            Image("SMark").resizable().frame(width: 22, height: 22)
-            Text("SlickDash").font(.system(size: 14, weight: .semibold))
-            Text(m.live ? "LIVE" : "IDLE")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(green)
-                .padding(.horizontal, 8).padding(.vertical, 2)
-                .background(Color(red: 0.08, green: 0.21, blue: 0.16))
-                .clipShape(Capsule())
-            Spacer()
-            ForEach(Mode.allCases, id: \.self) { mode in
-                Text(mode.rawValue)
-                    .font(.system(size: 11))
-                    .foregroundStyle(m.mode == mode ? cyan : muted)
-                    .padding(.horizontal, 9).padding(.vertical, 3)
-                    .overlay(Capsule().stroke(m.mode == mode ? cyan : line, lineWidth: 1))
-                    .onTapGesture { m.mode = mode }
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image("SMark").resizable().frame(width: 22, height: 22)
+                Text("SlickDash")
+                    .font(.system(size: 14, weight: .semibold))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                Text(m.live ? "LIVE" : "IDLE")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(green)
+                    .padding(.horizontal, 8).padding(.vertical, 2)
+                    .background(Color(red: 0.08, green: 0.21, blue: 0.16))
+                    .clipShape(Capsule())
+                    .fixedSize()
+                Spacer(minLength: 4)
+                HStack(spacing: 4) {
+                    ForEach(Mode.allCases, id: \.self) { mode in
+                        Text(mode.rawValue)
+                            .font(.system(size: 11))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .foregroundStyle(m.mode == mode ? cyan : muted)
+                            .padding(.horizontal, 7).padding(.vertical, 3)
+                            .overlay(Capsule().stroke(m.mode == mode ? cyan : line, lineWidth: 1))
+                            .onTapGesture { m.mode = mode }
+                    }
+                }
+                Image(systemName: "gearshape.fill")
+                    .foregroundStyle(muted)
+                    .frame(width: 28, height: 28)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(line))
+                    .onTapGesture { m.settings = true }
             }
-            Image(systemName: "gearshape.fill")
-                .foregroundStyle(muted)
-                .frame(width: 28, height: 28)
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(line))
-                .onTapGesture { m.settings = true }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            Rectangle().fill(cyan).frame(height: 1)
         }
-        .padding(.horizontal, 12).padding(.vertical, 8)
-        Rectangle().fill(cyan).frame(height: 1)
     }
 }
 
 struct CardBox<Content: View>: View {
+    var fillHeight: Bool = false
     @ViewBuilder var content: Content
     var body: some View {
         VStack(alignment: .leading, spacing: 6) { content }
             .padding(10)
+            .frame(maxWidth: .infinity, maxHeight: fillHeight ? .infinity : nil, alignment: .topLeading)
             .background(card)
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(line))
             .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -95,18 +107,25 @@ struct SimpleView: View {
             let land = geo.size.width > geo.size.height
             Group {
                 if land {
-                    HStack(spacing: 8) {
-                        CardBox {
+                    HStack(alignment: .top, spacing: 8) {
+                        CardBox(fillHeight: true) {
                             Lbl(t: "Fuel — this session")
                             Text(String(format: "%.0f%%", m.fuelPct)).font(.system(size: 42, weight: .semibold))
                             Bar(frac: CGFloat(m.fuelPct/100), color: amber)
                             Text("\(m.fuelPerLap.map { String(format: "%.1f%%/lap", $0) } ?? "—%/lap")")
                             Text("\(m.lapsRemaining.map { String(format: "%.1f laps remaining", $0) } ?? "— laps remaining")")
-                            Text("\(m.stops) stop").font(.system(size: 12)).foregroundStyle(muted)
-                        }.frame(maxWidth: .infinity, maxHeight: .infinity)
-                        CardBox { Lbl(t: "Tire temps"); TireGrid(p: m.packet).frame(maxHeight: .infinity) }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            Text(m.stops == 1 ? "1 stop" : "\(m.stops) stops").font(.system(size: 12)).foregroundStyle(muted)
+                        }
+                        .frame(maxWidth: geo.size.width * 0.42, maxHeight: .infinity)
+                        CardBox(fillHeight: true) {
+                            Lbl(t: "Tire temps")
+                            TireGrid(p: m.packet)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(8)
                 } else {
                     ScrollView {
                         VStack(spacing: 8) {
@@ -116,13 +135,18 @@ struct SimpleView: View {
                                 Bar(frac: CGFloat(m.fuelPct/100), color: amber)
                                 Text("\(m.fuelPerLap.map { String(format: "%.1f%%/lap", $0) } ?? "—%/lap")")
                                 Text("\(m.lapsRemaining.map { String(format: "%.1f laps remaining", $0) } ?? "— laps remaining")")
-                                Text("\(m.stops) stop").font(.system(size: 12)).foregroundStyle(muted)
+                                Text(m.stops == 1 ? "1 stop" : "\(m.stops) stops").font(.system(size: 12)).foregroundStyle(muted)
                             }
-                            CardBox { Lbl(t: "Tire temps"); TireGrid(p: m.packet).frame(height: 260) }
+                            CardBox(fillHeight: true) {
+                                Lbl(t: "Tire temps")
+                                TireGrid(p: m.packet)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            }
+                            .frame(height: 280)
                         }.padding(8)
                     }
                 }
-            }.padding(land ? 8 : 0)
+            }
         }
     }
 }
@@ -131,18 +155,30 @@ struct TireGrid: View {
     let p: TelemetryPacket?
     var body: some View {
         let cells: [(String, Float)] = [("FL", p?.tireFL ?? 0), ("FR", p?.tireFR ?? 0), ("RL", p?.tireRL ?? 0), ("RR", p?.tireRR ?? 0)]
-        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-            ForEach(cells, id: \.0) { k, v in
-                VStack {
-                    Text(k).font(.system(size: 11)).foregroundStyle(muted)
-                    Text(String(format: "%.0f°C", v)).font(.system(size: 28, weight: .semibold))
-                        .foregroundStyle(v >= 100 ? red : green)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(tireBg)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                tireCell(cells[0])
+                tireCell(cells[1])
             }
+            .frame(maxHeight: .infinity)
+            HStack(spacing: 8) {
+                tireCell(cells[2])
+                tireCell(cells[3])
+            }
+            .frame(maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func tireCell(_ item: (String, Float)) -> some View {
+        VStack(spacing: 4) {
+            Text(item.0).font(.system(size: 11)).foregroundStyle(muted)
+            Text(String(format: "%.0f°C", item.1)).font(.system(size: 28, weight: .semibold))
+                .foregroundStyle(item.1 >= 100 ? red : green)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(tireBg)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 }
 
@@ -166,7 +202,8 @@ struct DrivingView: View {
                             VStack(spacing: 8) {
                                 deltaCard
                                 fuelCard
-                                CardBox { Lbl(t: "Tire temps"); TireGrid(p: p).frame(height: 180) }
+                                CardBox(fillHeight: true) { Lbl(t: "Tire temps"); TireGrid(p: p).frame(maxWidth: .infinity, maxHeight: .infinity) }
+                                .frame(minHeight: 180)
                             }
                         }.frame(maxWidth: .infinity)
                     }.padding(8)
@@ -178,7 +215,8 @@ struct DrivingView: View {
                             throttleBrakeCard
                             deltaCard
                             fuelCard
-                            CardBox { Lbl(t: "Tire temps"); TireGrid(p: p).frame(height: 220) }
+                            CardBox(fillHeight: true) { Lbl(t: "Tire temps"); TireGrid(p: p).frame(maxWidth: .infinity, maxHeight: .infinity) }
+                            .frame(height: 220)
                         }.padding(8)
                     }
                 }
@@ -200,8 +238,10 @@ struct DrivingView: View {
         CardBox {
             HStack { Lbl(t: "Throttle"); Spacer(); Text("\(p?.throttlePct ?? 0)%").foregroundStyle(green) }
             Bar(frac: CGFloat(p?.throttlePct ?? 0)/100, color: Color(red: 0.086, green: 0.396, blue: 0.204))
+            InputTrace(samples: m.throttleTrace, color: green).frame(height: 28)
             HStack { Lbl(t: "Brake"); Spacer(); Text("\(p?.brakePct ?? 0)%").foregroundStyle(muted) }
             Bar(frac: CGFloat(p?.brakePct ?? 0)/100, color: red)
+            InputTrace(samples: m.brakeTrace, color: red).frame(height: 28)
         }
     }
 
@@ -223,8 +263,13 @@ struct DrivingView: View {
             Lbl(t: "Fuel — this session")
             Text(String(format: "%.0f%%", m.fuelPct)).font(.system(size: 22, weight: .semibold))
             Bar(frac: CGFloat(m.fuelPct/100), color: amber)
-            Text(m.fuelPerLap.map { String(format: "%.1f%%/lap", $0) } ?? "—")
-            Text("\(m.lapsRemaining.map { String(format: "%.1f", $0) } ?? "—") laps · \(m.stops) stop").foregroundStyle(muted).font(.system(size: 12))
+            Text(m.fuelPerLap.map { String(format: "%.1f%%/lap", $0) } ?? "—%/lap")
+            Text({
+                let rem = m.lapsRemaining.map { String(format: "%.1f", $0) } ?? "—"
+                let stops = m.stops == 1 ? "1 stop" : "\(m.stops) stops"
+                return "\(rem) laps · \(stops)"
+            }())
+                .foregroundStyle(muted).font(.system(size: 12))
         }
     }
 }
@@ -248,7 +293,12 @@ struct PitWallView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 8) {
-                CardBox { Lbl(t: "Delta vs session best"); DeltaTrace(samples: m.deltaTrace).frame(height: 80) }
+                CardBox {
+                    Lbl(t: "Delta vs session best")
+                    Text(formatDelta(m.liveDelta)).font(.system(size: 36, weight: .semibold))
+                        .foregroundStyle((m.liveDelta ?? 0) < 0 ? green : ((m.liveDelta == nil) ? text : red))
+                    DeltaTrace(samples: m.deltaTrace).frame(height: 80)
+                }
                 CardBox {
                     Lbl(t: "Gear / speed")
                     HStack {
@@ -260,11 +310,6 @@ struct PitWallView: View {
                     RpmBar(frac: p?.rpmFrac ?? 0)
                 }
                 CardBox {
-                    Lbl(t: "Delta vs session best")
-                    Text(formatDelta(m.liveDelta)).font(.system(size: 36, weight: .semibold))
-                        .foregroundStyle((m.liveDelta ?? 0) < 0 ? green : ((m.liveDelta == nil) ? text : red))
-                }
-                CardBox {
                     Lbl(t: "This session")
                     HStack {
                         VStack { Lbl(t: "Last"); Text(formatLap(m.lastMs)).foregroundStyle(cyan) }
@@ -274,14 +319,15 @@ struct PitWallView: View {
                         VStack { Lbl(t: "Laps in memory"); Text("\(m.lapsInMemory)") }
                     }
                 }
-                CardBox { Lbl(t: "Tire temps"); TireGrid(p: p).frame(height: 160) }
+                CardBox(fillHeight: true) { Lbl(t: "Tire temps"); TireGrid(p: p).frame(maxWidth: .infinity, maxHeight: .infinity) }
+                .frame(height: 180)
                 CardBox {
                     Lbl(t: "Fuel — this session")
                     HStack {
                         Text(String(format: "%.0f%%", m.fuelPct)).font(.system(size: 28, weight: .semibold)).foregroundStyle(amber)
                         VStack {
                             Bar(frac: CGFloat(m.fuelPct/100), color: amber)
-                            Text("\(m.fuelPerLap.map { String(format: "%.1f%%/lap", $0) } ?? "—") · \(m.lapsRemaining.map { String(format: "%.1f laps", $0) } ?? "—") · \(m.stops) stop")
+                            Text("\(m.fuelPerLap.map { String(format: "%.1f", $0) } ?? "—")%/lap · \(m.lapsRemaining.map { String(format: "%.1f", $0) } ?? "—") laps · \(m.stops) stop")
                                 .font(.system(size: 12)).foregroundStyle(muted)
                         }
                     }
@@ -324,6 +370,27 @@ struct DeltaTrace: View {
     }
 }
 
+struct InputTrace: View {
+    let samples: [Float]
+    let color: Color
+    var body: some View {
+        Canvas { ctx, size in
+            guard samples.count > 1 else { return }
+            var p = Path()
+            for (i, v) in samples.enumerated() {
+                let x = size.width * CGFloat(i) / CGFloat(samples.count - 1)
+                let y = size.height * (1 - CGFloat(min(1, max(0, v))))
+                if i == 0 { p.move(to: CGPoint(x: x, y: y)) } else { p.addLine(to: CGPoint(x: x, y: y)) }
+            }
+            ctx.stroke(p, with: .color(color), lineWidth: 1.5)
+        }.background(tireBg).clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+}
+
+private func qualityFrac(_ q: QualityRating) -> CGFloat {
+    switch q { case .good: return 0.92; case .fair: return 0.55; case .poor: return 0.2 }
+}
+
 struct SettingsSheet: View {
     @EnvironmentObject var m: DashModel
     var body: some View {
@@ -343,8 +410,9 @@ struct SettingsSheet: View {
                         Spacer()
                         Text(m.peer == nil ? "Idle" : "Connected").font(.system(size: 11, weight: .bold)).foregroundStyle(green)
                     }
-                    Bar(frac: m.peer == nil ? 0 : 0.86, color: cyan)
-                    Text("rx \(m.rx)   dec \(m.dec)   err \(m.err)").font(.system(size: 12)).foregroundStyle(muted)
+                    Bar(frac: m.peer == nil ? 0 : qualityFrac(m.quality), color: cyan)
+                    Text("\(m.quality.rawValue) · rx \(m.rx)   dec \(m.dec)   err \(m.err)")
+                        .font(.system(size: 12)).foregroundStyle(muted)
                 }
                 Button(action: { m.showIp.toggle() }) {
                     Text("Enter IP manually").foregroundStyle(cyan).frame(maxWidth: .infinity).padding(8)
