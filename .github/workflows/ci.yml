@@ -19,6 +19,6 @@ jobs:
           xcodebuild test \
             -project SlickDash.xcodeproj \
             -scheme SlickDash \
-            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            -destination 'platform=iOS Simulator,name=iPhone 17' \
             -only-testing:SlickDashTests \
             CODE_SIGNING_ALLOWED=NO
