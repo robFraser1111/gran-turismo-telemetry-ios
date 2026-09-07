@@ -33,32 +33,42 @@ struct ContentView: View {
 struct HeaderBar: View {
     @EnvironmentObject var m: DashModel
     var body: some View {
-        HStack(spacing: 8) {
-            Image("SMark").resizable().frame(width: 22, height: 22)
-            Text("SlickDash").font(.system(size: 14, weight: .semibold))
-            Text(m.live ? "LIVE" : "IDLE")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(green)
-                .padding(.horizontal, 8).padding(.vertical, 2)
-                .background(Color(red: 0.08, green: 0.21, blue: 0.16))
-                .clipShape(Capsule())
-            Spacer()
-            ForEach(Mode.allCases, id: \.self) { mode in
-                Text(mode.rawValue)
-                    .font(.system(size: 11))
-                    .foregroundStyle(m.mode == mode ? cyan : muted)
-                    .padding(.horizontal, 9).padding(.vertical, 3)
-                    .overlay(Capsule().stroke(m.mode == mode ? cyan : line, lineWidth: 1))
-                    .onTapGesture { m.mode = mode }
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image("SMark").resizable().frame(width: 22, height: 22)
+                Text("SlickDash")
+                    .font(.system(size: 14, weight: .semibold))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                Text(m.live ? "LIVE" : "IDLE")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(green)
+                    .padding(.horizontal, 8).padding(.vertical, 2)
+                    .background(Color(red: 0.08, green: 0.21, blue: 0.16))
+                    .clipShape(Capsule())
+                    .fixedSize()
+                Spacer(minLength: 4)
+                HStack(spacing: 4) {
+                    ForEach(Mode.allCases, id: \.self) { mode in
+                        Text(mode.rawValue)
+                            .font(.system(size: 11))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .foregroundStyle(m.mode == mode ? cyan : muted)
+                            .padding(.horizontal, 7).padding(.vertical, 3)
+                            .overlay(Capsule().stroke(m.mode == mode ? cyan : line, lineWidth: 1))
+                            .onTapGesture { m.mode = mode }
+                    }
+                }
+                Image(systemName: "gearshape.fill")
+                    .foregroundStyle(muted)
+                    .frame(width: 28, height: 28)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(line))
+                    .onTapGesture { m.settings = true }
             }
-            Image(systemName: "gearshape.fill")
-                .foregroundStyle(muted)
-                .frame(width: 28, height: 28)
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(line))
-                .onTapGesture { m.settings = true }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            Rectangle().fill(cyan).frame(height: 1)
         }
-        .padding(.horizontal, 12).padding(.vertical, 8)
-        Rectangle().fill(cyan).frame(height: 1)
     }
 }
 
@@ -102,7 +112,7 @@ struct SimpleView: View {
                             Bar(frac: CGFloat(m.fuelPct/100), color: amber)
                             Text("\(m.fuelPerLap.map { String(format: "%.1f%%/lap", $0) } ?? "—%/lap")")
                             Text("\(m.lapsRemaining.map { String(format: "%.1f laps remaining", $0) } ?? "— laps remaining")")
-                            Text("\(m.stops) stop").font(.system(size: 12)).foregroundStyle(muted)
+                            Text(m.stops == 1 ? "1 stop" : "\(m.stops) stops").font(.system(size: 12)).foregroundStyle(muted)
                         }.frame(maxWidth: .infinity, maxHeight: .infinity)
                         CardBox { Lbl(t: "Tire temps"); TireGrid(p: m.packet).frame(maxHeight: .infinity) }
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -116,7 +126,7 @@ struct SimpleView: View {
                                 Bar(frac: CGFloat(m.fuelPct/100), color: amber)
                                 Text("\(m.fuelPerLap.map { String(format: "%.1f%%/lap", $0) } ?? "—%/lap")")
                                 Text("\(m.lapsRemaining.map { String(format: "%.1f laps remaining", $0) } ?? "— laps remaining")")
-                                Text("\(m.stops) stop").font(.system(size: 12)).foregroundStyle(muted)
+                                Text(m.stops == 1 ? "1 stop" : "\(m.stops) stops").font(.system(size: 12)).foregroundStyle(muted)
                             }
                             CardBox { Lbl(t: "Tire temps"); TireGrid(p: m.packet).frame(height: 260) }
                         }.padding(8)
@@ -223,8 +233,9 @@ struct DrivingView: View {
             Lbl(t: "Fuel — this session")
             Text(String(format: "%.0f%%", m.fuelPct)).font(.system(size: 22, weight: .semibold))
             Bar(frac: CGFloat(m.fuelPct/100), color: amber)
-            Text(m.fuelPerLap.map { String(format: "%.1f%%/lap", $0) } ?? "—")
-            Text("\(m.lapsRemaining.map { String(format: "%.1f", $0) } ?? "—") laps · \(m.stops) stop").foregroundStyle(muted).font(.system(size: 12))
+            Text(m.fuelPerLap.map { String(format: "%.1f%%/lap", $0) } ?? "—%/lap")
+            Text("\(m.lapsRemaining.map { String(format: "%.1f", $0) } ?? "—") laps · \(m.stops) stop")
+                .foregroundStyle(muted).font(.system(size: 12))
         }
     }
 }
@@ -248,7 +259,12 @@ struct PitWallView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 8) {
-                CardBox { Lbl(t: "Delta vs session best"); DeltaTrace(samples: m.deltaTrace).frame(height: 80) }
+                CardBox {
+                    Lbl(t: "Delta vs session best")
+                    Text(formatDelta(m.liveDelta)).font(.system(size: 36, weight: .semibold))
+                        .foregroundStyle((m.liveDelta ?? 0) < 0 ? green : ((m.liveDelta == nil) ? text : red))
+                    DeltaTrace(samples: m.deltaTrace).frame(height: 80)
+                }
                 CardBox {
                     Lbl(t: "Gear / speed")
                     HStack {
@@ -258,11 +274,6 @@ struct PitWallView: View {
                         Spacer()
                     }
                     RpmBar(frac: p?.rpmFrac ?? 0)
-                }
-                CardBox {
-                    Lbl(t: "Delta vs session best")
-                    Text(formatDelta(m.liveDelta)).font(.system(size: 36, weight: .semibold))
-                        .foregroundStyle((m.liveDelta ?? 0) < 0 ? green : ((m.liveDelta == nil) ? text : red))
                 }
                 CardBox {
                     Lbl(t: "This session")
@@ -281,7 +292,7 @@ struct PitWallView: View {
                         Text(String(format: "%.0f%%", m.fuelPct)).font(.system(size: 28, weight: .semibold)).foregroundStyle(amber)
                         VStack {
                             Bar(frac: CGFloat(m.fuelPct/100), color: amber)
-                            Text("\(m.fuelPerLap.map { String(format: "%.1f%%/lap", $0) } ?? "—") · \(m.lapsRemaining.map { String(format: "%.1f laps", $0) } ?? "—") · \(m.stops) stop")
+                            Text("\(m.fuelPerLap.map { String(format: "%.1f", $0) } ?? "—")%/lap · \(m.lapsRemaining.map { String(format: "%.1f", $0) } ?? "—") laps · \(m.stops) stop")
                                 .font(.system(size: 12)).foregroundStyle(muted)
                         }
                     }
