@@ -193,6 +193,7 @@ struct LapRow: Identifiable { let id = UUID(); let lap: Int; let timeMs: Int; le
 final class SessionTracker {
     private var laps: [LapRow] = []
     private var lastLapIndex = -1
+    private var lastLapMsSeen = 0
     private var completedFlying = 0
     private var fuelAtStart: Double?
     private var fuelPerLap: Double?
@@ -200,22 +201,49 @@ final class SessionTracker {
     private var current: [(Float, Float, Float)] = []
     private var lapT0 = Date()
     private var trace: [Float] = []
+    private var heldDelta: Double?
+    private var lastSampleX: Float?
+    private var lastSampleZ: Float?
     private(set) var bestMs: Int?
+
+    /// Reset stint when GT7 starts a new race (lap counter drops).
+    private func resetStint() {
+        laps = []
+        lastLapIndex = -1
+        lastLapMsSeen = 0
+        completedFlying = 0
+        fuelAtStart = nil
+        fuelPerLap = nil
+        ghost = []
+        current = []
+        lapT0 = Date()
+        trace = []
+        heldDelta = nil
+        lastSampleX = nil
+        lastSampleZ = nil
+        bestMs = nil
+    }
+
     func onPacket(_ p: TelemetryPacket) -> (
         fuelPerLap: Double?, rem: Double?, stops: Int, last: Int?, best: Int?,
         delta: Double?, trace: [Float], laps: [LapRow], count: Int
     ) {
+        if lastLapIndex >= 0 && p.currentLap >= 0 && p.currentLap < lastLapIndex {
+            resetStint()
+        }
+
         if p.currentLap != lastLapIndex {
-            if lastLapIndex >= 0 && p.lastLapMs > 0 {
+            if lastLapIndex >= 0 && p.lastLapMs > 0 && p.lastLapMs != lastLapMsSeen {
                 completedFlying += 1
                 if completedFlying > 1 {
                     laps.append(LapRow(lap: lastLapIndex, timeMs: p.lastLapMs, isBest: false))
                     if laps.count > 100 { laps.removeFirst() }
-                    let best = laps.map(\.timeMs).min()
-                    bestMs = best
-                    laps = laps.map { LapRow(lap: $0.lap, timeMs: $0.timeMs, isBest: best == $0.timeMs) }
-                    if best == p.lastLapMs && current.count >= 2 { ghost = current }
+                    relabelBest()
+                    if bestMs == p.lastLapMs && current.count >= 2 {
+                        ghost = current
+                    }
                 }
+                lastLapMsSeen = p.lastLapMs
                 if let s = fuelAtStart {
                     let used = max(0, s - p.fuelPercent)
                     if used > 0.2 { fuelPerLap = used }
@@ -224,25 +252,60 @@ final class SessionTracker {
             lastLapIndex = p.currentLap
             fuelAtStart = p.fuelPercent
             current = []
+            lastSampleX = nil
+            lastSampleZ = nil
             lapT0 = Date()
+            heldDelta = nil
         }
+
         let t = Float(Date().timeIntervalSince(lapT0))
-        if p.onTrack { current.append((p.posX, p.posZ, t)) }
+        if p.onTrack {
+            appendSample(x: p.posX, z: p.posZ, t: t)
+        }
         let d = liveDelta(x: p.posX, z: p.posZ, t: t)
-        if let d { trace.append(Float(d)); if trace.count > 120 { trace.removeFirst() } }
+        if let d {
+            heldDelta = d
+            trace.append(Float(d))
+            if trace.count > 120 { trace.removeFirst() }
+        }
         let rem = (fuelPerLap ?? 0) > 0.05 ? p.fuelPercent / (fuelPerLap ?? 1) : nil
+        // Session best is local flyers only — never GT7 packet PB.
         return (fuelPerLap, rem, (rem ?? 99) < 8 ? 1 : 0, p.lastLapMs > 0 ? p.lastLapMs : nil,
-                bestMs ?? (p.bestLapMs > 0 ? p.bestLapMs : nil), d, trace, Array(laps.suffix(12)), laps.count)
+                bestMs, d ?? heldDelta, Array(trace), Array(laps.suffix(12)), laps.count)
     }
+
+    private func relabelBest() {
+        let best = laps.map(\.timeMs).min()
+        bestMs = best
+        var marked = false
+        laps = laps.map { row in
+            let isBest = !marked && best == row.timeMs
+            if isBest { marked = true }
+            return LapRow(lap: row.lap, timeMs: row.timeMs, isBest: isBest)
+        }
+    }
+
+    private func appendSample(x: Float, z: Float, t: Float) {
+        if let lx = lastSampleX, let lz = lastSampleZ {
+            let dist = hypot(Double(x - lx), Double(z - lz))
+            if dist < 1.0 { return }
+        }
+        current.append((x, z, t))
+        lastSampleX = x
+        lastSampleZ = z
+        if current.count > 4096 { current.removeFirst() }
+    }
+
     private func liveDelta(x: Float, z: Float, t: Float) -> Double? {
-        guard ghost.count >= 2, completedFlying >= 1 else { return nil }
+        guard ghost.count >= 2 else { return nil }
         var best = Double.greatestFiniteMagnitude
         var gT = ghost[0].2
         for s in ghost {
             let d = hypot(Double(s.0 - x), Double(s.1 - z))
             if d < best { best = d; gT = s.2 }
         }
-        if best > 40 { return nil }
+        // Far off the ghost line — hold last good delta when we have one.
+        if best > 32 { return nil }
         return Double(t - gT)
     }
 }
