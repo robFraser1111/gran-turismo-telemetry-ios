@@ -82,7 +82,11 @@ struct TelemetryPacket {
     var brakePct: Int { Int(Double(brake) / 255 * 100) }
     var rpmFrac: Float { min(1, max(0, rpm / Float(max(alertMaxRpm, 1)))) }
     var gearDisplay: String { switch gear { case 0: return "R"; case 15: return "N"; default: return "\(gear)" } }
+    /// Car on track, not paused, not loading — same as Windows IsRacing.
     var onTrack: Bool { flags & 1 != 0 && flags & 2 == 0 && flags & 4 == 0 }
+    var isPaused: Bool { flags & 2 != 0 }
+    var isLoading: Bool { flags & 4 != 0 }
+    var isRacing: Bool { onTrack }
     static func parse(_ p: [UInt8]) -> TelemetryPacket {
         func f(_ o: Int) -> Float {
             var v: UInt32 = UInt32(p[o]) | UInt32(p[o+1])<<8 | UInt32(p[o+2])<<16 | UInt32(p[o+3])<<24
@@ -283,11 +287,11 @@ final class SessionTracker {
     private var lapT0 = Date()
     private var trace: [Float] = []
     private var heldDelta: Double?
+    private var ghostMatchIndex = -1
     private var lastSampleX: Float?
     private var lastSampleZ: Float?
     private(set) var bestMs: Int?
 
-    /// Reset stint when GT7 starts a new race (lap counter drops).
     private func resetStint() {
         laps = []
         lastLapIndex = -1
@@ -300,6 +304,7 @@ final class SessionTracker {
         lapT0 = Date()
         trace = []
         heldDelta = nil
+        ghostMatchIndex = -1
         lastSampleX = nil
         lastSampleZ = nil
         bestMs = nil
@@ -313,6 +318,16 @@ final class SessionTracker {
             resetStint()
         }
 
+        // Menus / pause / loading: keep table, freeze live delta & path sampling (Windows parity).
+        if !p.isRacing {
+            heldDelta = nil
+            ghostMatchIndex = -1
+            let rem = (fuelPerLap ?? 0) > 0.05 ? p.fuelPercent / (fuelPerLap ?? 1) : nil
+            return (fuelPerLap, rem, (rem ?? 99) < 8 ? 1 : 0,
+                    p.lastLapMs > 0 ? p.lastLapMs : nil, bestMs,
+                    nil, [], Array(laps.suffix(12)), laps.count)
+        }
+
         if p.currentLap != lastLapIndex {
             if lastLapIndex >= 0 && p.lastLapMs > 0 && p.lastLapMs != lastLapMsSeen {
                 completedFlying += 1
@@ -322,6 +337,9 @@ final class SessionTracker {
                     relabelBest()
                     if bestMs == p.lastLapMs && current.count >= 2 {
                         ghost = current
+                        ghostMatchIndex = -1
+                        heldDelta = nil
+                        trace = []
                     }
                 }
                 lastLapMsSeen = p.lastLapMs
@@ -336,13 +354,12 @@ final class SessionTracker {
             lastSampleX = nil
             lastSampleZ = nil
             lapT0 = Date()
+            // Keep ghostMatchIndex across flying laps so delta stays locked to the path.
             heldDelta = nil
         }
 
         let t = Float(Date().timeIntervalSince(lapT0))
-        if p.onTrack {
-            appendSample(x: p.posX, z: p.posZ, t: t)
-        }
+        appendSample(x: p.posX, z: p.posZ, t: t)
         let d = liveDelta(x: p.posX, z: p.posZ, t: t)
         if let d {
             heldDelta = d
@@ -350,9 +367,8 @@ final class SessionTracker {
             if trace.count > 120 { trace.removeFirst() }
         }
         let rem = (fuelPerLap ?? 0) > 0.05 ? p.fuelPercent / (fuelPerLap ?? 1) : nil
-        // Session best is local flyers only — never GT7 packet PB.
         return (fuelPerLap, rem, (rem ?? 99) < 8 ? 1 : 0, p.lastLapMs > 0 ? p.lastLapMs : nil,
-                bestMs, d ?? heldDelta, Array(trace), Array(laps.suffix(12)), laps.count)
+                bestMs, d, Array(trace), Array(laps.suffix(12)), laps.count)
     }
 
     private func relabelBest() {
@@ -378,16 +394,73 @@ final class SessionTracker {
     }
 
     private func liveDelta(x: Float, z: Float, t: Float) -> Double? {
-        guard ghost.count >= 2 else { return nil }
-        var best = Double.greatestFiniteMagnitude
-        var gT = ghost[0].2
-        for s in ghost {
-            let d = hypot(Double(s.0 - x), Double(s.1 - z))
-            if d < best { best = d; gT = s.2 }
+        let n = ghost.count
+        guard n >= 2 else { return nil }
+        guard let idx = findGhostMatch(x: x, z: z, elapsed: t) else {
+            return nil
         }
-        // Far off the ghost line — hold last good delta when we have one.
-        if best > 32 { return nil }
-        return Double(t - gT)
+        let g = ghost[idx]
+        let dist = hypot(Double(g.0 - x), Double(g.1 - z))
+        if dist > 32 {
+            return nil
+        }
+        ghostMatchIndex = idx
+        let d = Double(t - g.2)
+        // Reject absurd first locks (start/finish XZ collision) until elapsed agrees.
+        if abs(d) > 30 && ghostMatchIndex < n / 10 {
+            // still early on the lap but matched a far-time ghost point — unlock and retry next packet
+            ghostMatchIndex = -1
+            return nil
+        }
+        return d
+    }
+
+    /// Windows-style: search near the last match; among nearby XZ points prefer similar elapsed.
+    private func findGhostMatch(x: Float, z: Float, elapsed: Float) -> Int? {
+        let n = ghost.count
+        guard n > 0 else { return nil }
+        let start: Int
+        let count: Int
+        if ghostMatchIndex < 0 {
+            start = 0
+            count = n
+        } else {
+            let fwd = min(n, max(32, n / 8))
+            let back = min(n, max(8, n / 32))
+            start = (ghostMatchIndex - back + n) % n
+            count = min(n, back + fwd + 1)
+        }
+        var bestIdx = -1
+        var bestDistSq = Double.greatestFiniteMagnitude
+        for i in 0..<count {
+            let idx = (start + i) % n
+            let g = ghost[idx]
+            let dx = Double(g.0 - x)
+            let dz = Double(g.1 - z)
+            let d = dx * dx + dz * dz
+            if d < bestDistSq {
+                bestDistSq = d
+                bestIdx = idx
+            }
+        }
+        guard bestIdx >= 0 else { return nil }
+        let near = bestDistSq + 16
+        var chosen = bestIdx
+        var bestElapsedErr = abs(Double(elapsed) - Double(ghost[bestIdx].2))
+        for i in 0..<count {
+            let idx = (start + i) % n
+            let g = ghost[idx]
+            let dx = Double(g.0 - x)
+            let dz = Double(g.1 - z)
+            let d = dx * dx + dz * dz
+            if d > near { continue }
+            let err = abs(Double(elapsed) - Double(g.2))
+            if err < bestElapsedErr {
+                bestElapsedErr = err
+                chosen = idx
+            }
+        }
+        return chosen
     }
 }
 

@@ -42,19 +42,34 @@ final class DashModel: ObservableObject {
         client.onPacket = { p in
             let r = self.tracker.onPacket(p)
             DispatchQueue.main.async {
-                self.packet = p
-                self.live = p.onTrack
-                self.fuelPct = p.fuelPercent
+                self.dec += 1
+                // LIVE = actively racing (not pause/menu/loading). Still receive packets either way.
+                self.live = p.isRacing
                 self.fuelPerLap = r.fuelPerLap
                 self.lapsRemaining = r.rem
                 self.stops = r.stops
                 self.lastMs = r.last
                 self.bestMs = r.best
-                self.liveDelta = r.delta
-                self.deltaTrace = r.trace
                 self.laps = r.laps
                 self.lapsInMemory = r.count
-                self.dec += 1
+                if p.isRacing {
+                    self.packet = p
+                    self.fuelPct = p.fuelPercent
+                    self.liveDelta = r.delta
+                    self.deltaTrace = r.trace
+                } else {
+                    // Freeze HUD at menu/pause like Windows (keep lap table).
+                    self.liveDelta = nil
+                    self.deltaTrace = []
+                    if var frozen = self.packet {
+                        frozen.speedMps = 0
+                        frozen.rpm = 0
+                        frozen.throttle = 0
+                        frozen.brake = 0
+                        frozen.gear = 15 // N
+                        self.packet = frozen
+                    }
+                }
             }
         }
         findPs5()
