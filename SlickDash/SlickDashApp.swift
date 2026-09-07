@@ -16,7 +16,9 @@ final class DashModel: ObservableObject {
     @Published var live = false
     @Published var peer: String?
     @Published var status = "Waiting for telemetry"
-    @Published var rx = 0, dec = 0, err = 0
+    @Published var rx = 0
+    @Published var dec = 0
+    @Published var err = 0
     @Published var packet: TelemetryPacket?
     @Published var fuelPct = 0.0
     @Published var fuelPerLap: Double?
