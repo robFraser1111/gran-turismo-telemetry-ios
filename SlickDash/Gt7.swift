@@ -1,5 +1,4 @@
 import Foundation
-import Network
 
 enum Salsa20 {
     static let sigma = Array("expand 32-byte k".utf8)
