@@ -15,7 +15,9 @@ struct ContentView: View {
     @EnvironmentObject var m: DashModel
     var body: some View {
         ZStack(alignment: .trailing) {
+            // Background may paint under status bar / home indicator.
             page.ignoresSafeArea()
+            // Chrome stays inside the system safe area (notch, Dynamic Island, home indicator).
             VStack(spacing: 0) {
                 HeaderBar()
                 switch m.mode {
@@ -24,6 +26,7 @@ struct ContentView: View {
                 case .pit: PitWallView()
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             if m.settings { SettingsSheet() }
         }
         .foregroundStyle(text)
@@ -360,6 +363,10 @@ struct SettingsSheet: View {
             .frame(maxHeight: .infinity)
             .background(page)
             .overlay(Rectangle().frame(width: 1).foregroundStyle(cyan), alignment: .leading)
+            // Keep Find PS5 / fields clear of home indicator and landscape side insets.
+            .safeAreaPadding(.trailing)
+            .safeAreaPadding(.bottom)
+            .safeAreaPadding(.top)
         }
     }
 }
